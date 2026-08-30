@@ -145,6 +145,55 @@
     font-weight:600;
   }
 
+  .quality-select{
+    width:100%;
+    padding:11px 12px;
+    margin-bottom:14px;
+    background:var(--panel-2);
+    border:1px solid var(--line);
+    border-radius:10px;
+    color:var(--text);
+    font-family:'IBM Plex Mono',monospace;
+    font-size:13px;
+    outline:none;
+  }
+
+  .progress-wrap{
+    display:none;
+    margin-top:14px;
+  }
+  .progress-wrap.show{display:block;}
+  .progress-track{
+    width:100%;
+    height:8px;
+    background:var(--panel-2);
+    border:1px solid var(--line);
+    border-radius:6px;
+    overflow:hidden;
+  }
+  .progress-fill{
+    height:100%;
+    width:0%;
+    background:var(--amber);
+    transition:width .25s ease;
+  }
+  .progress-fill.indeterminate{
+    width:40%;
+    animation:indet 1.2s ease-in-out infinite;
+  }
+  @keyframes indet{
+    0%{transform:translateX(-100%);}
+    100%{transform:translateX(250%);}
+  }
+  .progress-meta{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11.5px;
+    color:var(--muted);
+    margin-top:6px;
+    display:flex;
+    justify-content:space-between;
+  }
+
   .go{
     width:100%;
     padding:13px 0;
@@ -246,8 +295,15 @@
       <button data-mode="audio">AUDIO (MP3)</button>
     </div>
 
+    <select id="quality" class="quality-select" style="display:none;"></select>
+
     <button class="go" id="go">Fetch link</button>
     <div class="status" id="status"></div>
+
+    <div class="progress-wrap" id="progressWrap">
+      <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="progress-meta" id="progressMeta"></div>
+    </div>
 
     <div class="result" id="result">
       <img id="thumb" src="" alt="">
@@ -274,15 +330,21 @@
   const rmeta = document.getElementById('rmeta');
   const dlBtn = document.getElementById('dlBtn');
   const modeButtons = document.querySelectorAll('.modes button');
+  const qualitySelect = document.getElementById('quality');
+  const progressWrap = document.getElementById('progressWrap');
+  const progressFill = document.getElementById('progressFill');
+  const progressMeta = document.getElementById('progressMeta');
 
   let mode = 'auto';
   let currentUrl = '';
+  let pollTimer = null;
 
   modeButtons.forEach(btn => {
     btn.addEventListener('click', () => {
       modeButtons.forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       mode = btn.dataset.mode;
+      qualitySelect.style.display = (mode === 'video' && qualitySelect.options.length) ? 'block' : 'none';
     });
   });
 
@@ -296,11 +358,31 @@
     bars.classList.toggle('active', busy);
   }
 
+  function formatBytes(bytes){
+    if(!bytes) return '';
+    const mb = bytes / (1024*1024);
+    return mb >= 1000 ? (mb/1024).toFixed(1)+' GB' : mb.toFixed(1)+' MB';
+  }
+
+  function formatSpeed(bps){
+    if(!bps) return '';
+    return formatBytes(bps) + '/s';
+  }
+
+  function formatEta(sec){
+    if(sec === null || sec === undefined) return '';
+    const m = Math.floor(sec/60), s = Math.round(sec%60);
+    return `${m}:${s.toString().padStart(2,'0')} left`;
+  }
+
   async function fetchInfo(){
     const url = urlInput.value.trim();
     if(!url){ setStatus('Paste a link first.', 'error'); return; }
     currentUrl = url;
     resultEl.classList.remove('show');
+    progressWrap.classList.remove('show');
+    qualitySelect.style.display = 'none';
+    qualitySelect.innerHTML = '';
     setBusy(true);
     setStatus('Reading link…');
     try{
@@ -321,6 +403,16 @@
       thumb.style.display = data.thumbnail ? 'block' : 'none';
       resultEl.classList.add('show');
       setStatus('Found it.', 'ok');
+
+      if(data.qualities && data.qualities.length){
+        data.qualities.forEach(q => {
+          const opt = document.createElement('option');
+          opt.value = q.value;
+          opt.textContent = q.label;
+          qualitySelect.appendChild(opt);
+        });
+        qualitySelect.style.display = (mode === 'video') ? 'block' : 'none';
+      }
     }catch(err){
       setStatus('Network error — is the server running?', 'error');
     }
@@ -336,16 +428,87 @@
   async function doDownload(){
     if(!currentUrl){ return; }
     setBusy(true);
-    setStatus('Downloading on the server — nothing shows here until it finishes, bigger files take longer…');
+    progressWrap.classList.add('show');
+    progressFill.classList.add('indeterminate');
+    progressFill.style.width = '';
+    progressMeta.textContent = '';
+    setStatus('Starting…');
+
     try{
-      const res = await fetch('/api/download', {
+      const startRes = await fetch('/api/start', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({url: currentUrl, mode})
+        body: JSON.stringify({url: currentUrl, mode, quality: qualitySelect.value || 'best'})
       });
+      const startData = await startRes.json();
+      if(!startRes.ok){
+        setStatus(startData.error || 'Could not start download.', 'error');
+        setBusy(false);
+        progressWrap.classList.remove('show');
+        return;
+      }
+      pollProgress(startData.job_id);
+    }catch(err){
+      setStatus('Network error starting download.', 'error');
+      setBusy(false);
+      progressWrap.classList.remove('show');
+    }
+  }
+
+  function pollProgress(jobId){
+    clearInterval(pollTimer);
+    pollTimer = setInterval(async () => {
+      try{
+        const res = await fetch(`/api/progress/${jobId}`);
+        const data = await res.json();
+        if(!res.ok){
+          clearInterval(pollTimer);
+          setStatus(data.error || 'Lost track of that download.', 'error');
+          setBusy(false);
+          progressWrap.classList.remove('show');
+          return;
+        }
+
+        if(typeof data.percent === 'number'){
+          progressFill.classList.remove('indeterminate');
+          progressFill.style.width = data.percent + '%';
+        }
+        const parts = [];
+        if(data.speed) parts.push(formatSpeed(data.speed));
+        if(data.eta !== undefined && data.eta !== null) parts.push(formatEta(data.eta));
+        progressMeta.textContent = parts.join(' · ');
+
+        if(data.stage === 'processing'){
+          setStatus('Processing (merging/converting)…');
+        } else {
+          setStatus('Downloading…');
+        }
+
+        if(data.status === 'finished'){
+          clearInterval(pollTimer);
+          progressFill.style.width = '100%';
+          setStatus('Grabbing the file…');
+          await deliverFile(jobId);
+        } else if(data.status === 'error'){
+          clearInterval(pollTimer);
+          setStatus(data.error || 'Download failed.', 'error');
+          setBusy(false);
+          progressWrap.classList.remove('show');
+        }
+      }catch(err){
+        clearInterval(pollTimer);
+        setStatus('Network error while checking progress.', 'error');
+        setBusy(false);
+      }
+    }, 800);
+  }
+
+  async function deliverFile(jobId){
+    try{
+      const res = await fetch(`/api/result/${jobId}`);
       if(!res.ok){
         const data = await res.json().catch(()=>({}));
-        setStatus(data.error || 'Download failed.', 'error');
+        setStatus(data.error || 'Could not retrieve the file.', 'error');
         setBusy(false);
         return;
       }
@@ -364,9 +527,10 @@
       URL.revokeObjectURL(objUrl);
       setStatus('Downloaded.', 'ok');
     }catch(err){
-      setStatus('Network error during download.', 'error');
+      setStatus('Network error retrieving the file.', 'error');
     }
     setBusy(false);
+    progressWrap.classList.remove('show');
   }
 
   goBtn.addEventListener('click', fetchInfo);
