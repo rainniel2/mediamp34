@@ -7,10 +7,24 @@ from urllib.parse import urlparse
 
 import requests
 from flask import Flask, render_template, request, jsonify, send_file
+from PIL import Image
 
 import yt_dlp
 
 app = Flask(__name__)
+
+# Raster formats we can actually convert between with Pillow. SVG is vector,
+# so it's handled separately (passthrough only — no rasterizing/vectorizing).
+CONVERTIBLE_IMAGE_FORMATS = {
+    "png": "PNG",
+    "jpg": "JPEG",
+    "jpeg": "JPEG",
+    "webp": "WEBP",
+    "bmp": "BMP",
+    "gif": "GIF",
+}
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+SVG_EXT = ".svg"
 
 DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "grabit-downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -35,6 +49,49 @@ def schedule_cleanup(path, delay=120):
         except OSError:
             pass
     threading.Timer(delay, _remove).start()
+
+
+def friendly_error(e):
+    """
+    Turn a raw exception into something short enough to show in the UI
+    instead of a wall of yt-dlp/requests internals.
+    """
+    msg = str(e).strip()
+    low = msg.lower()
+    if "404" in msg or "not found" in low:
+        return "That link doesn't exist (404, not found)."
+    if "403" in msg or "forbidden" in low:
+        return "That link is private or blocked (403, forbidden)."
+    if "unsupported url" in low:
+        return "That link isn't supported."
+    if "unable to download webpage" in low or "name or service not known" in low:
+        return "Couldn't reach that link. Check the URL and try again."
+    # yt-dlp errors sometimes end with a long "report this issue" tail; drop it.
+    msg = msg.split("; please report")[0].strip()
+    return msg if len(msg) <= 160 else msg[:157] + "..."
+
+
+def convert_image(local_path, download_name, target_format):
+    """Convert a downloaded image file to another raster format with Pillow."""
+    target_format = target_format.lower()
+    pillow_fmt = CONVERTIBLE_IMAGE_FORMATS.get(target_format)
+    if not pillow_fmt:
+        raise ValueError(f"unsupported format '{target_format}'")
+
+    with Image.open(local_path) as img:
+        if pillow_fmt == "JPEG" and img.mode in ("RGBA", "LA", "P"):
+            img = img.convert("RGB")
+        new_path = os.path.splitext(local_path)[0] + f".{target_format}"
+        img.save(new_path, pillow_fmt)
+
+    if new_path != local_path:
+        try:
+            os.remove(local_path)
+        except OSError:
+            pass
+
+    base, _ = os.path.splitext(download_name)
+    return new_path, f"{base}.{target_format}"
 
 
 def looks_like_direct_file(url):
@@ -87,14 +144,26 @@ def info():
     # Direct file links: skip yt-dlp entirely, just describe the file.
     if looks_like_direct_file(url):
         filename = os.path.basename(urlparse(url).path) or "file"
+        ext = os.path.splitext(urlparse(url).path)[1].lower()
+        is_svg = ext == SVG_EXT
+        is_raster_image = ext in IMAGE_EXTS
+        is_image = is_raster_image or is_svg
+
+        formats = []
+        if is_raster_image:
+            formats = ["original"] + sorted(
+                {f for f in CONVERTIBLE_IMAGE_FORMATS if f != "jpeg"}
+            )
+
         return jsonify({
             "title": filename,
-            "thumbnail": url if url.lower().split("?")[0].endswith(
-                (".jpg", ".jpeg", ".png", ".gif", ".webp")
-            ) else None,
+            "thumbnail": url if is_raster_image or is_svg else None,
             "duration": None,
             "uploader": None,
             "direct": True,
+            "is_image": is_image,
+            "is_svg": is_svg,
+            "formats": formats,
             "qualities": [],
         })
 
@@ -108,13 +177,16 @@ def info():
             "duration": meta.get("duration"),
             "uploader": meta.get("uploader") or meta.get("channel"),
             "direct": False,
+            "is_image": False,
+            "is_svg": False,
+            "formats": [],
             "qualities": build_quality_options(meta),
         })
     except Exception as e:
-        return jsonify({"error": f"Couldn't read that link ({e})"}), 400
+        return jsonify({"error": friendly_error(e)}), 400
 
 
-def _run_direct_download(job_id, url):
+def _run_direct_download(job_id, url, target_format=None):
     try:
         r = requests.get(url, stream=True, timeout=30)
         r.raise_for_status()
@@ -131,10 +203,31 @@ def _run_direct_download(job_id, url):
                 _set_job(job_id, percent=percent, downloaded=done, total=total or None)
 
         download_name = os.path.basename(urlparse(url).path) or f"download{ext}"
+
+        if target_format and target_format != "original":
+            _set_job(job_id, percent=99, stage="processing")
+            try:
+                local_path, download_name = convert_image(local_path, download_name, target_format)
+            except Exception as e:
+                _set_job(job_id, status="error",
+                          error=f"Couldn't convert to {target_format.upper()} ({e}).")
+                return
+
         _set_job(job_id, status="finished", percent=100, filename=local_path,
                   download_name=download_name)
+    except requests.exceptions.HTTPError as e:
+        code = e.response.status_code if e.response is not None else None
+        if code == 404:
+            _set_job(job_id, status="error", error="That link doesn't exist (404, not found).")
+        elif code == 403:
+            _set_job(job_id, status="error", error="That link is private or blocked (403, forbidden).")
+        else:
+            _set_job(job_id, status="error", error=f"The server rejected that link (HTTP {code}).")
+    except requests.exceptions.RequestException:
+        _set_job(job_id, status="error",
+                  error="Couldn't reach that link. Check the URL and try again.")
     except Exception as e:
-        _set_job(job_id, status="error", error=f"Couldn't fetch that file ({e})")
+        _set_job(job_id, status="error", error=friendly_error(e))
 
 
 def _run_ytdlp_download(job_id, url, mode, quality):
@@ -201,15 +294,16 @@ def _run_ytdlp_download(job_id, url, mode, quality):
         _set_job(job_id, status="finished", percent=100, filename=filename,
                   download_name=os.path.basename(filename))
     except Exception as e:
-        _set_job(job_id, status="error", error=f"Download failed ({e})")
+        _set_job(job_id, status="error", error=friendly_error(e))
 
 
 @app.route("/api/start", methods=["POST"])
 def start():
     data = request.get_json(force=True) or {}
     url = (data.get("url") or "").strip()
-    mode = data.get("mode", "auto")        # "auto" | "video" | "audio"
-    quality = data.get("quality", "best")  # e.g. "1080", "720", "best"
+    mode = data.get("mode", "auto")          # "auto" | "video" | "audio"
+    quality = data.get("quality", "best")    # e.g. "1080", "720", "best"
+    img_format = data.get("format", "original")  # "original" | "png" | "jpg" | ...
 
     if not url:
         return jsonify({"error": "Paste a link first."}), 400
@@ -223,7 +317,7 @@ def start():
         }
 
     if looks_like_direct_file(url) and mode != "audio":
-        t = threading.Thread(target=_run_direct_download, args=(job_id, url), daemon=True)
+        t = threading.Thread(target=_run_direct_download, args=(job_id, url, img_format), daemon=True)
     else:
         t = threading.Thread(target=_run_ytdlp_download, args=(job_id, url, mode, quality), daemon=True)
     t.start()

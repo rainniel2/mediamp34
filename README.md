@@ -38,8 +38,11 @@ Open **http://localhost:5000** in your browser.
 
 1. Paste a link into the box.
 2. Choose **Auto** (best available), **Video**, or **Audio (MP3)**.
-3. Click **Fetch link** to preview the title/thumbnail.
-4. Click **Download** — the file saves through your browser's normal download.
+3. Click **Download** to preview the title/thumbnail. For direct image links
+   (jpg, png, gif, webp, bmp, svg) a **format** dropdown appears so you can
+   convert the image to PNG, JPG, WEBP, BMP, or GIF on the way out. SVGs are
+   vector files and are always saved as-is.
+4. Click **Save file**, the file saves through your browser's normal download.
 
 ## Notes
 
