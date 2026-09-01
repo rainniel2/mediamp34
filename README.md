@@ -38,44 +38,21 @@ Open **http://localhost:5000** in your browser.
 
 1. Paste a link into the box.
 2. Choose **Auto** (best available), **Video**, or **Audio (MP3)**.
-3. Click **Download** to preview the title/thumbnail. For direct image links
-   (jpg, png, gif, webp, bmp, svg) a **format** dropdown appears so you can
-   convert the image to PNG, JPG, WEBP, BMP, or GIF on the way out. SVGs are
-   vector files and are always saved as-is.
-4. Click **Save file**, the file saves through your browser's normal download.
+3. Click **Fetch link** to preview the title/thumbnail.
+4. Click **Download** — the file saves through your browser's normal download.
 
 ## Notes
 
-- This runs entirely on your own machine, nothing is uploaded anywhere else.
+- This runs entirely on your own machine — nothing is uploaded anywhere else.
 - Files are held in a temp folder just long enough to hand them to your
   browser, then deleted automatically.
 - `yt-dlp` (the extraction library this uses) is updated constantly to keep
   up with sites changing their pages. If a specific link stops working,
   try: `pip install -U yt-dlp`.
-- Only download things you actually have the right to: your own uploads,
+- Only download things you actually have the right to — your own uploads,
   Creative-Commons/public-domain content, or files you own. Some sites'
   terms of service restrict downloading, and copyright law varies by
   country, so that part's on you to check.
-
-## "Sign in to confirm you're not a bot" (YouTube)
-
-YouTube has stepped up bot detection, especially for requests coming from
-server/cloud IPs rather than a home internet connection. This app already
-tries a couple of workarounds automatically (asking YouTube for its TV/Safari
-app clients instead of the regular website client, which usually avoids the
-check entirely). If it still shows up:
-
-1. Update `yt-dlp`: `pip install -U yt-dlp`. YouTube changes things often and
-   old versions break first.
-2. As a fallback, export cookies from a browser where you're signed in to
-   YouTube (an extension like "Get cookies.txt LOCALLY" works well), save the
-   file as `cookies.txt`, and drop it in the same folder as `app.py` (or set
-   the `COOKIES_FILE` environment variable to point at it). The app will pick
-   it up automatically. Use a throwaway/secondary Google account, not your
-   main one, since the file grants that account's session to the app.
-3. If you're deploying to a cloud host (Render, Railway, etc.), the block is
-   often tied to that provider's IP range being flagged, not your code, so it
-   may pass locally but fail once deployed.
 
 ## 4. Deploy it so a friend can use it too
 

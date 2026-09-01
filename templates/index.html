@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>grabit: paste a link, get the file</title>
+<title>grabit — paste a link, get the file</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -220,10 +220,6 @@
     font-size:12.5px;
     color:var(--muted);
     min-height:18px;
-    line-height:1.5;
-    white-space:normal;
-    overflow-wrap:anywhere;
-    word-break:break-word;
   }
   .status.error{color:var(--red);}
   .status.ok{color:var(--teal);}
@@ -284,7 +280,7 @@
 
   <div class="eyebrow">link in, file out</div>
   <h1>grab<span>it</span></h1>
-  <p class="sub">Paste a video, audio, or image link. Pick a format. Get the file, no accounts, no watermarks.</p>
+  <p class="sub">Paste a video, audio, or image link. Pick a format. Get the file — no accounts, no watermarks.</p>
 
   <div class="card">
     <div class="input-row">
@@ -300,9 +296,8 @@
     </div>
 
     <select id="quality" class="quality-select" style="display:none;"></select>
-    <select id="format" class="quality-select" style="display:none;"></select>
 
-    <button class="go" id="go">Download</button>
+    <button class="go" id="go">Fetch link</button>
     <div class="status" id="status"></div>
 
     <div class="progress-wrap" id="progressWrap">
@@ -313,15 +308,15 @@
     <div class="result" id="result">
       <img id="thumb" src="" alt="">
       <div class="result-info">
-        <div class="result-title" id="rtitle">Untitled</div>
+        <div class="result-title" id="rtitle">—</div>
         <div class="result-meta" id="rmeta"></div>
       </div>
-      <button class="dl-btn" id="dlBtn">Save file</button>
+      <button class="dl-btn" id="dlBtn">Download</button>
     </div>
   </div>
 
   <footer>
-    Only download things you have the right to: your own uploads, content licensed for reuse, or files you own. Respect the source platform's terms.
+    Only download things you have the right to — your own uploads, content licensed for reuse, or files you own. Respect the source platform's terms.
   </footer>
 
 <script>
@@ -336,7 +331,6 @@
   const dlBtn = document.getElementById('dlBtn');
   const modeButtons = document.querySelectorAll('.modes button');
   const qualitySelect = document.getElementById('quality');
-  const formatSelect = document.getElementById('format');
   const progressWrap = document.getElementById('progressWrap');
   const progressFill = document.getElementById('progressFill');
   const progressMeta = document.getElementById('progressMeta');
@@ -389,8 +383,6 @@
     progressWrap.classList.remove('show');
     qualitySelect.style.display = 'none';
     qualitySelect.innerHTML = '';
-    formatSelect.style.display = 'none';
-    formatSelect.innerHTML = '';
     setBusy(true);
     setStatus('Reading link…');
     try{
@@ -405,8 +397,7 @@
       rtitle.textContent = data.title || 'Untitled';
       rmeta.textContent = [
         data.uploader,
-        data.duration ? formatDuration(data.duration) : null,
-        data.is_svg ? 'SVG vector image, saved as-is' : null
+        data.duration ? formatDuration(data.duration) : null
       ].filter(Boolean).join(' · ') || 'Ready to download';
       thumb.src = data.thumbnail || '';
       thumb.style.display = data.thumbnail ? 'block' : 'none';
@@ -422,18 +413,8 @@
         });
         qualitySelect.style.display = (mode === 'video') ? 'block' : 'none';
       }
-
-      if(data.formats && data.formats.length){
-        data.formats.forEach(f => {
-          const opt = document.createElement('option');
-          opt.value = f;
-          opt.textContent = f === 'original' ? 'Original format' : f.toUpperCase();
-          formatSelect.appendChild(opt);
-        });
-        formatSelect.style.display = 'block';
-      }
     }catch(err){
-      setStatus('Network error. Is the server running?', 'error');
+      setStatus('Network error — is the server running?', 'error');
     }
     setBusy(false);
   }
@@ -457,12 +438,7 @@
       const startRes = await fetch('/api/start', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({
-          url: currentUrl,
-          mode,
-          quality: qualitySelect.value || 'best',
-          format: formatSelect.value || 'original'
-        })
+        body: JSON.stringify({url: currentUrl, mode, quality: qualitySelect.value || 'best'})
       });
       const startData = await startRes.json();
       if(!startRes.ok){
