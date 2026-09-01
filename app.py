@@ -66,6 +66,9 @@ def friendly_error(e):
         return "That link isn't supported."
     if "unable to download webpage" in low or "name or service not known" in low:
         return "Couldn't reach that link. Check the URL and try again."
+    if "confirm you" in low and "bot" in low:
+        return ("YouTube is asking for a sign-in check on this video/IP. "
+                "Add a cookies.txt file next to app.py (see README) and try again.")
     # yt-dlp errors sometimes end with a long "report this issue" tail; drop it.
     msg = msg.split("; please report")[0].strip()
     return msg if len(msg) <= 160 else msg[:157] + "..."
@@ -92,6 +95,29 @@ def convert_image(local_path, download_name, target_format):
 
     base, _ = os.path.splitext(download_name)
     return new_path, f"{base}.{target_format}"
+
+
+# Path to an optional cookies.txt (Netscape format) exported from a browser
+# that's signed in to YouTube. Drop a file here (or set COOKIES_FILE) to get
+# past YouTube's "Sign in to confirm you're not a bot" check. See README.
+COOKIES_FILE = os.environ.get(
+    "COOKIES_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+)
+
+
+def base_ydl_opts():
+    """
+    Options shared by every yt-dlp call. YouTube increasingly blocks the
+    default "web" client as a bot; asking for the tv/web_safari/android
+    clients first avoids that in most cases without needing cookies at all.
+    If a cookies.txt is present, it's used as a fallback for the harder cases.
+    """
+    opts = {
+        "extractor_args": {"youtube": {"player_client": ["tv", "web_safari", "android"]}},
+    }
+    if os.path.isfile(COOKIES_FILE):
+        opts["cookiefile"] = COOKIES_FILE
+    return opts
 
 
 def looks_like_direct_file(url):
@@ -168,7 +194,10 @@ def info():
         })
 
     try:
-        ydl_opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True}
+        ydl_opts = {
+            "quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True,
+            **base_ydl_opts(),
+        }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             meta = ydl.extract_info(url, download=False)
         return jsonify({
@@ -256,6 +285,7 @@ def _run_ytdlp_download(job_id, url, mode, quality):
         "quiet": True,
         "no_warnings": True,
         "progress_hooks": [hook],
+        **base_ydl_opts(),
     }
 
     if mode == "audio":
