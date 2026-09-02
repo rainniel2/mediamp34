@@ -73,6 +73,17 @@ check entirely). If it still shows up:
    the `COOKIES_FILE` environment variable to point at it). The app will pick
    it up automatically. Use a throwaway/secondary Google account, not your
    main one, since the file grants that account's session to the app.
+   - If you see `does not look like a Netscape format cookies file`, the app
+     now auto-detects and repairs the three most common causes: a JSON
+     export instead of Netscape format, a missing `# Netscape HTTP Cookie
+     File` header line, and a raw copy-paste from the browser's DevTools
+     "Application > Cookies" table (different column order and date
+     format entirely). If it still fails, re-export a fresh file rather
+     than hand-editing the old one.
+   - Treat `cookies.txt` like a password: it's a live login session for
+     whatever account you exported it from. Don't paste its contents into
+     a chat, email, or issue tracker, copy the file directly. If it's ever
+     exposed, sign out of that account everywhere to invalidate it.
 3. If you're deploying to a cloud host (Render, Railway, etc.), the block is
    often tied to that provider's IP range being flagged, not your code, so it
    may pass locally but fail once deployed.

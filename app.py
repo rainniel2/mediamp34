@@ -1,8 +1,11 @@
 import os
+import re
+import json
 import time
 import uuid
 import threading
 import tempfile
+from datetime import datetime
 from urllib.parse import urlparse
 
 import requests
@@ -69,6 +72,10 @@ def friendly_error(e):
     if "confirm you" in low and "bot" in low:
         return ("YouTube is asking for a sign-in check on this video/IP. "
                 "Add a cookies.txt file next to app.py (see README) and try again.")
+    if "netscape format" in low:
+        return ("cookies.txt isn't in a format yt-dlp can read (wrong export type, "
+                "or edited by hand). Re-export it fresh with \"Get cookies.txt LOCALLY\" "
+                "and don't open/save it in another editor first.")
     # yt-dlp errors sometimes end with a long "report this issue" tail; drop it.
     msg = msg.split("; please report")[0].strip()
     return msg if len(msg) <= 160 else msg[:157] + "..."
@@ -97,12 +104,148 @@ def convert_image(local_path, download_name, target_format):
     return new_path, f"{base}.{target_format}"
 
 
-# Path to an optional cookies.txt (Netscape format) exported from a browser
-# that's signed in to YouTube. Drop a file here (or set COOKIES_FILE) to get
-# past YouTube's "Sign in to confirm you're not a bot" check. See README.
+# Path to an optional cookies.txt exported from a browser that's signed in
+# to YouTube. Drop a file here (or set COOKIES_FILE) to get past YouTube's
+# "Sign in to confirm you're not a bot" check. See README.
 COOKIES_FILE = os.environ.get(
     "COOKIES_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
 )
+
+NETSCAPE_HEADERS = ("# Netscape HTTP Cookie File", "# HTTP Cookie File")
+
+
+def _json_cookies_to_netscape(cookies):
+    """Convert a JSON cookie export (Cookie-Editor, EditThisCookie, etc.) into
+    the tab-separated Netscape format yt-dlp actually requires."""
+    far_future = str(int(time.time()) + 60 * 60 * 24 * 365)
+    lines = ["# Netscape HTTP Cookie File", "# auto-converted from JSON by grabit", ""]
+    for c in cookies:
+        domain = c.get("domain", "")
+        name = c.get("name", "")
+        if not domain or not name:
+            continue
+        host_only = c.get("hostOnly", not domain.startswith("."))
+        flag = "FALSE" if host_only else "TRUE"
+        path = c.get("path") or "/"
+        secure = "TRUE" if c.get("secure") else "FALSE"
+        expiry = c.get("expirationDate") or c.get("expiry")
+        expiry = str(int(float(expiry))) if expiry else far_future
+        value = c.get("value", "")
+        lines.append("\t".join([domain, flag, path, secure, expiry, name, value]))
+    return "\n".join(lines) + "\n"
+
+
+def _looks_like_domain(s):
+    s = (s or "").strip()
+    return bool(s) and "." in s and " " not in s and not s.replace(".", "").isdigit()
+
+
+def _expiry_to_unix(expires_raw, far_future):
+    s = (expires_raw or "").strip()
+    if not s or s.lower() == "session":
+        return far_future
+    try:
+        return str(int(float(s)))  # already a unix timestamp
+    except ValueError:
+        pass
+    try:
+        iso = s[:-1] + "+00:00" if s.endswith("Z") else s
+        return str(int(datetime.fromisoformat(iso).timestamp()))
+    except ValueError:
+        return far_future
+
+
+def _devtools_table_to_netscape(raw):
+    """
+    Convert a copy-paste of Chrome/Firefox DevTools' Application > Cookies
+    table (Name, Value, Domain, Path, Expires, Size, HttpOnly, Secure, ...)
+    into Netscape format. This is a very common way people grab cookies
+    without a dedicated export extension.
+    """
+    far_future = str(int(time.time()) + 60 * 60 * 24 * 365)
+    lines = ["# Netscape HTTP Cookie File",
+              "# auto-converted from a DevTools cookie-table paste by grabit", ""]
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) < 4:
+            continue
+        name, value, domain, path = (fields + ["", "", "", ""])[:4]
+        expires_raw = fields[4] if len(fields) > 4 else ""
+        secure_flag = fields[7] if len(fields) > 7 else ""
+        name, domain = name.strip(), domain.strip()
+        if not name or not domain:
+            continue
+        host_only = not domain.startswith(".")
+        flag = "FALSE" if host_only else "TRUE"
+        secure = "TRUE" if secure_flag.strip() else "FALSE"
+        expiry = _expiry_to_unix(expires_raw, far_future)
+        lines.append("\t".join([domain, flag, path.strip() or "/", secure, expiry, name, value]))
+    return "\n".join(lines) + "\n"
+
+
+def resolved_cookies_file():
+    """
+    Return a path to a cookies file yt-dlp can actually load, fixing the two
+    most common reasons for "does not look like a Netscape format cookies
+    file": the export being JSON instead of Netscape, and the required
+    header comment being missing. Returns None if there's no cookies file.
+    """
+    if not os.path.isfile(COOKIES_FILE):
+        return None
+    try:
+        with open(COOKIES_FILE, "r", encoding="utf-8-sig") as f:
+            raw = f.read()
+    except OSError:
+        return None
+
+    first_nonblank = next((ln for ln in raw.splitlines() if ln.strip()), "")
+    if first_nonblank.startswith(NETSCAPE_HEADERS):
+        return COOKIES_FILE  # already correct, nothing to do
+
+    stripped = raw.lstrip()
+    fixed_path = COOKIES_FILE + ".fixed.txt"
+
+    if stripped.startswith("[") or stripped.startswith("{"):
+        # A JSON cookie export saved with a .txt extension — convert it.
+        try:
+            data = json.loads(raw)
+            cookies = data if isinstance(data, list) else data.get("cookies", [])
+            with open(fixed_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(_json_cookies_to_netscape(cookies))
+            return fixed_path
+        except Exception:
+            return COOKIES_FILE  # couldn't fix it; let yt-dlp raise its own error
+
+    if "\t" in raw:
+        data_line = next(
+            (ln for ln in raw.splitlines() if ln.strip() and not ln.strip().startswith(("#", "$"))),
+            ""
+        )
+        fields = data_line.split("\t")
+
+        if len(fields) == 7 and fields[1] in ("TRUE", "FALSE") and fields[3] in ("TRUE", "FALSE"):
+            # Proper 7-column Netscape rows, just missing the header line.
+            with open(fixed_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write("# Netscape HTTP Cookie File\n" + raw)
+            return fixed_path
+
+        if len(fields) >= 8 and _looks_like_domain(fields[2]):
+            # A DevTools "Application > Cookies" table pasted as tab-separated
+            # text (Name, Value, Domain, Path, Expires, ...) — different
+            # column order and date format than Netscape entirely.
+            with open(fixed_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(_devtools_table_to_netscape(raw))
+            return fixed_path
+
+        # Unrecognized tab-separated shape: best-effort, assume it's just
+        # missing the header and let yt-dlp's own error surface if it isn't.
+        with open(fixed_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("# Netscape HTTP Cookie File\n" + raw)
+        return fixed_path
+
+    return COOKIES_FILE
 
 
 def base_ydl_opts():
@@ -115,8 +258,9 @@ def base_ydl_opts():
     opts = {
         "extractor_args": {"youtube": {"player_client": ["tv", "web_safari", "android"]}},
     }
-    if os.path.isfile(COOKIES_FILE):
-        opts["cookiefile"] = COOKIES_FILE
+    cookies_path = resolved_cookies_file()
+    if cookies_path:
+        opts["cookiefile"] = cookies_path
     return opts
 
 
