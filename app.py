@@ -76,6 +76,10 @@ def friendly_error(e):
         return ("cookies.txt isn't in a format yt-dlp can read (wrong export type, "
                 "or edited by hand). Re-export it fresh with \"Get cookies.txt LOCALLY\" "
                 "and don't open/save it in another editor first.")
+    if "needs to be reloaded" in low:
+        return ("YouTube changed something on their end that broke this yt-dlp "
+                "version. This is fixed by updating yt-dlp, not by anything in this "
+                "app's code, see README for how to force a fresh build.")
     # yt-dlp errors sometimes end with a long "report this issue" tail; drop it.
     msg = msg.split("; please report")[0].strip()
     return msg if len(msg) <= 160 else msg[:157] + "..."

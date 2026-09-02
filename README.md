@@ -84,6 +84,26 @@ check entirely). If it still shows up:
      whatever account you exported it from. Don't paste its contents into
      a chat, email, or issue tracker, copy the file directly. If it's ever
      exposed, sign out of that account everywhere to invalidate it.
+
+## "The page needs to be reloaded" (YouTube)
+
+YouTube periodically changes something in its player that breaks the current
+`yt-dlp` extractor. This isn't a bug in this app; it's fixed upstream by a
+`yt-dlp` update, usually within a day or two of it starting.
+
+This app already depends on `yt-dlp[default]`, which includes the
+`yt-dlp-ejs` package YouTube's playback checks now require. If you still hit
+this error on a deployed instance, it almost always means the deployed image
+is running an **older, cached** `yt-dlp` build rather than actually missing
+a fix:
+
+1. On Render, use **Manual Deploy > Clear build cache & deploy** instead of
+   a normal deploy. Docker layer caching means a routine redeploy can reuse
+   the old `pip install` layer and keep the stale version even after
+   `yt-dlp` has released a fix.
+2. Locally, run `pip install -U "yt-dlp[default]"` and try again.
+3. If it's still broken right after updating, it's a live yt-dlp bug;
+   check https://github.com/yt-dlp/yt-dlp/issues for the current status.
 3. If you're deploying to a cloud host (Render, Railway, etc.), the block is
    often tied to that provider's IP range being flagged, not your code, so it
    may pass locally but fail once deployed.
