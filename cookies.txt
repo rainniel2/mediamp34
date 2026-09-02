@@ -1,0 +1,15 @@
+__Secure-1PAPISID	-azXHZAUGJzxjLAm/A-yqk5mqf5r-i4OJN	.google.com	/	2027-10-06T13:49:53.643Z	51		✓				High	
+__Secure-1PAPISID	-azXHZAUGJzxjLAm/A-yqk5mqf5r-i4OJN	.youtube.com	/	2027-10-06T13:50:01.717Z	51		✓				High	
+__Secure-1PSID	g.a000CAnz0Etl9oddJr7ShEM4__yfvmf4DC6MlhrI1bSdW2-QISxvJmTx5RkPUEkJUIkfkBmvHQACgYKAXYSARESFQHGX2Mid7MCsvMqtj9RPCAgQ_w1-RoVAUF8yKrQuFHPvUIvGcLi_m5NTSGg0076	.youtube.com	/	2027-10-06T13:50:01.717Z	167	✓	✓				High	
+__Secure-1PSID	g.a000CAnz0Etl9oddJr7ShEM4__yfvmf4DC6MlhrI1bSdW2-QISxvJmTx5RkPUEkJUIkfkBmvHQACgYKAXYSARESFQHGX2Mid7MCsvMqtj9RPCAgQ_w1-RoVAUF8yKrQuFHPvUIvGcLi_m5NTSGg0076	.google.com	/	2027-10-06T13:49:54.249Z	167	✓	✓				High	
+__Secure-1PSIDCC	AKEyXzW-ott5K_0G53WOcNz8Lqqi7L6R0M95y3isXpr2IedhTuD3t6uDzzKvoo3NbKKH51-b	.google.com	/	2027-09-01T13:52:03.953Z	88	✓	✓				High	
+__Secure-1PSIDCC	AKEyXzXeRlpJUOkY3NVnh2v6TQyiJgJR2FK4NwXhGquo96gj4sEd-8d_7JInYlnsrTJK5jon	.youtube.com	/	2027-09-01T13:53:08.583Z	88	✓	✓				High	
+__Secure-1PSIDRTS	sidts-CjcBXMw41RI1OgVXlZnnzpOsZqYFcgX4fAkFaYqCjCjC2mNX1HWC_lkfxRGLnMNBKrfI3bMDISdiEAA	.google.com	/	2026-09-01T13:59:54.854Z	102	✓	✓				High	
+__Secure-1PSIDTS	sidts-CjUBXMw41c5IPO_tVMT44LsWQldJLWpus0uf6qJAmAHKK54o4x5SB-zBh7bIuyDYN13BFYKFvhAA	.youtube.com	/	2027-09-01T13:50:01.717Z	98	✓	✓				High	
+__Secure-1PSIDTS	sidts-CjcBXMw41RI1OgVXlZnnzpOsZqYFcgX4fAkFaYqCjCjC2mNX1HWC_lkfxRGLnMNBKrfI3bMDISdiEAA	.google.com	/	2027-09-01T13:49:54.854Z	101	✓	✓				High	
+__Secure-3PAPISID	-azXHZAUGJzxjLAm/A-yqk5mqf5r-i4OJN	.google.com	/	2027-10-06T13:49:53.643Z	51		✓	None			High	
+__Secure-3PAPISID	-azXHZAUGJzxjLAm/A-yqk5mqf5r-i4OJN	.youtube.com	/	2027-10-06T13:50:01.717Z	51		✓	None			High	
+__Secure-3PSID	g.a000CAnz0Etl9oddJr7ShEM4__yfvmf4DC6MlhrI1bSdW2-QISxvQ678YYLVUeKQfnJNwSWmhAACgYKAZ0SARESFQHGX2MimP5nzYtlLGv7x5kYBSCmVhoVAUF8yKp0ienG5B_YmfyKK48cJc3u0076	.google.com	/	2027-10-06T13:49:54.249Z	167	✓	✓	None			High	
+__Secure-3PSID	g.a000CAnz0Etl9oddJr7ShEM4__yfvmf4DC6MlhrI1bSdW2-QISxvQ678YYLVUeKQfnJNwSWmhAACgYKAZ0SARESFQHGX2MimP5nzYtlLGv7x5kYBSCmVhoVAUF8yKp0ienG5B_YmfyKK48cJc3u0076	.youtube.com	/	2027-10-06T13:50:01.717Z	167	✓	✓	None			High	
+__Secure-3PSIDCC	AKEyXzWK8ADCK7Ij3_z4eqrK_VXXYD1sAd-PleByyPd2eRzJzwh9lLkUNUHqeFZG28QJGfvcQA	.google.com	/	2027-09-01T13:52:03.953Z	90	✓	✓	None			High	
+__Secure-3PSIDCC	AKEyXzUHDzkLaU97R8x_sVIAdJaulQgpsHn3OLFhcA-tEcTxsKz0ozY6-QhJJYQA3lUtPHazvg	.youtube.com	/	2027-09-01T13:53:08.583Z	90	✓	✓	None			High	
