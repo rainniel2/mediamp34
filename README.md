@@ -44,7 +44,13 @@ Open **http://localhost:5000** in your browser.
    (jpg, png, gif, webp, bmp, svg) a **format** dropdown appears so you can
    convert the image to PNG, JPG, WEBP, BMP, GIF, or **PDF** on the way out.
    SVGs are vector files and are always saved as-is.
-4. Click **Save file**, the file saves through your browser's normal download.
+4. Once found, an estimated file size shows next to the title (updates as
+   you switch Video/Audio or change quality). It's an estimate — exact for
+   direct file links, approximate for `yt-dlp` sites since sources report
+   sizes inconsistently.
+5. Click **Save file**, the file saves through your browser's normal
+   download, and the box clears itself so the next link can be pasted
+   straight in.
 
 **Documents, archives, and other non-media files** (PDF, Word/Excel/
 PowerPoint, ZIP, APK, EPUB, etc.) work the same way — paste the link, click
@@ -53,6 +59,39 @@ stays a ZIP), just a clean pass-through download. If the link doesn't have
 a recognizable extension (a hashed CDN URL, say) and isn't a site `yt-dlp`
 recognizes, the app asks the server what the file actually is via its
 `Content-Type` before giving up.
+
+## Optional: PIN-protect downloads
+
+Anyone with the deployed URL can use this app. If you don't want that, set
+an `ACCESS_PIN` environment variable and the app will ask for it before
+starting any download (previewing a link's title/size is still free — only
+the actual download is gated). Once someone enters it correctly, that
+device stays unlocked for 30 days.
+
+This is **basic protection**, on purpose: it keeps a leaked or crawled link
+from being used by random visitors. It is not hardened against a
+determined attacker (no rate-limiting/lockout on wrong attempts), so don't
+rely on it for anything sensitive.
+
+To turn it on:
+
+1. In Render, go to your service → **Environment** → add:
+   - `ACCESS_PIN` — whatever PIN/passphrase you want people to enter.
+   - `SECRET_KEY` — a random string used to sign the "unlocked" cookie.
+     Generate one with:
+     ```bash
+     python3 -c "import secrets; print(secrets.token_hex(32))"
+     ```
+     **Set this explicitly.** If you leave it unset, the app still works,
+     but it generates a random key every time the process starts — and
+     Render's free tier restarts the app after ~15 minutes of no traffic,
+     which would silently log everyone out each time that happens.
+2. Redeploy. Locally, the same variables work via your shell or a `.env`
+   loader of your choice — this app doesn't require one, just export them
+   before running `python app.py`.
+
+Leave `ACCESS_PIN` unset (the default) and the app behaves exactly as
+before, with no PIN prompt anywhere.
 
 ## Notes
 

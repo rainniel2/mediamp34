@@ -1,21 +1,52 @@
 import os
 import re
+import hmac
 import json
 import time
 import uuid
+import secrets
 import mimetypes
 import threading
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 import requests
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, session
 from PIL import Image
 
 import yt_dlp
 
 app = Flask(__name__)
+
+# --- PIN gate (only gates starting an actual download, not previewing a
+# link's info) -------------------------------------------------------------
+#
+# Set ACCESS_PIN in the environment to turn this on; leave it unset and the
+# app behaves exactly as before (no PIN prompt at all). This is deliberately
+# basic: a shared PIN + a signed session cookie, meant to keep a leaked or
+# crawled link from being used by random visitors — not to withstand a
+# determined attacker.
+#
+# SECRET_KEY should also be set in production so sessions survive process
+# restarts (e.g. Render's free tier spinning down after idle time). Without
+# it, a random key is generated per process start, which means everyone's
+# "remembered" unlock is invalidated every time the app restarts. See
+# README for how to generate and set one.
+app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+ACCESS_PIN = os.environ.get("ACCESS_PIN", "").strip()
+
+
+def pin_gate_enabled():
+    return bool(ACCESS_PIN)
+
+
+def is_unlocked():
+    return (not pin_gate_enabled()) or session.get("unlocked") is True
+
 
 # Raster formats we can actually convert between with Pillow. SVG is vector,
 # so it's handled separately (passthrough only — no rasterizing/vectorizing).
@@ -88,7 +119,10 @@ def friendly_error(e):
     if "403" in msg or "forbidden" in low:
         return "That link is private or blocked (403, forbidden)."
     if "unsupported url" in low:
-        return "That link isn't supported."
+        return ("That link isn't from a site this app supports, and it doesn't "
+                 "look like a direct file link either. Try a link from a site "
+                 "like YouTube, TikTok, or X, or a direct link to an image, "
+                 "video, or document.")
     if "unable to download webpage" in low or "name or service not known" in low:
         return "Couldn't reach that link. Check the URL and try again."
     if "confirm you" in low and "bot" in low:
@@ -314,6 +348,24 @@ def base_ydl_opts():
     return opts
 
 
+def get_remote_filesize(url, timeout=8):
+    """
+    Best-effort HEAD request to read Content-Length before any download
+    starts, so the UI can show an estimated size up front. Returns None if
+    the server doesn't report one (chunked responses, some CDNs) rather
+    than guessing — the frontend just omits the size line in that case.
+    """
+    try:
+        r = requests.head(url, timeout=timeout, allow_redirects=True)
+        r.close()
+        length = r.headers.get("Content-Length")
+        if length and length.isdigit():
+            return int(length)
+    except requests.exceptions.RequestException:
+        pass
+    return None
+
+
 def looks_like_direct_file(url):
     """Quick, offline check for links that just point straight at a file —
     media, image, or any everyday document/archive type — based on the
@@ -336,6 +388,7 @@ def probe_direct_url(url, timeout=10):
     as a plain file to download as-is. Returns None for anything that looks
     like a genuine webpage yt-dlp just doesn't support.
     """
+    filesize = None
     try:
         r = requests.head(url, timeout=timeout, allow_redirects=True)
         content_type = r.headers.get("Content-Type", "")
@@ -347,6 +400,18 @@ def probe_direct_url(url, timeout=10):
                 headers={"Range": "bytes=0-0"},
             )
             content_type = r.headers.get("Content-Type", "")
+            # A ranged response's own Content-Length is just the 1 byte we
+            # asked for; the real total is in Content-Range, e.g.
+            # "bytes 0-0/123456".
+            content_range = r.headers.get("Content-Range", "")
+            if "/" in content_range:
+                total = content_range.rsplit("/", 1)[-1].strip()
+                if total.isdigit():
+                    filesize = int(total)
+        else:
+            length = r.headers.get("Content-Length")
+            if length and length.isdigit():
+                filesize = int(length)
         r.close()
     except requests.exceptions.RequestException:
         return None
@@ -375,6 +440,7 @@ def probe_direct_url(url, timeout=10):
         "formats": image_format_options() if is_raster_image else [],
         "qualities": [],
         "content_type": content_type or None,
+        "filesize": filesize,
     }
 
 
@@ -421,29 +487,73 @@ def build_quality_options(meta):
     """
     Turn yt-dlp's raw format list into a short, deduped list of resolutions
     the user can actually pick between, e.g. [{"value": "1080", "label":
-    "1080p"}, ...] plus a trailing "Best available" option.
-    """
-    seen_heights = set()
-    heights = []
-    for f in meta.get("formats") or []:
-        height = f.get("height")
-        vcodec = f.get("vcodec")
-        if not height or vcodec in (None, "none"):
-            continue
-        if height in seen_heights:
-            continue
-        seen_heights.add(height)
-        heights.append(height)
+    "1080p", "filesize": 48213000}, ...] plus a trailing "Best available"
+    option, and separately the best audio-only stream's size.
 
-    heights.sort(reverse=True)
-    result = [{"value": str(h), "label": f"{h}p"} for h in heights]
-    result.append({"value": "best", "label": "Best available"})
-    return result
+    Sizes are estimates: yt-dlp reports "filesize" (exact) or
+    "filesize_approx" (estimated) per format, not always both, and actual
+    video downloads are muxed as video-only + audio-only streams merged
+    together — so each height's estimate is that height's largest known
+    video-only size plus the best audio-only size, which is what a merged
+    download will actually end up close to. Formats/heights with no size
+    reported at all (common for some live/DASH formats) come back as
+    filesize: None, and the UI just omits the number rather than guessing.
+    """
+    formats = meta.get("formats") or []
+
+    best_audio_size = 0
+    for f in formats:
+        if f.get("vcodec") in (None, "none") and f.get("acodec") not in (None, "none"):
+            size = f.get("filesize") or f.get("filesize_approx") or 0
+            best_audio_size = max(best_audio_size, size)
+
+    heights = {}  # height -> largest known video-only size at that height
+    for f in formats:
+        height = f.get("height")
+        if not height or f.get("vcodec") in (None, "none"):
+            continue
+        size = f.get("filesize") or f.get("filesize_approx") or 0
+        heights[height] = max(heights.get(height, 0), size)
+
+    result = []
+    for h in sorted(heights, reverse=True):
+        video_size = heights[h]
+        total = (video_size + best_audio_size) if video_size else 0
+        result.append({"value": str(h), "label": f"{h}p", "filesize": total or None})
+    result.append({"value": "best", "label": "Best available", "filesize": None})
+
+    return result, (best_audio_size or None)
 
 
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/api/config")
+def config():
+    # Lets the frontend know up front whether it should expect a PIN prompt
+    # (shows a small lock hint on the Save button) — no secrets in here.
+    return jsonify({"pin_required": pin_gate_enabled()})
+
+
+@app.route("/api/unlock", methods=["POST"])
+def unlock():
+    if not pin_gate_enabled():
+        session.permanent = True
+        session["unlocked"] = True
+        return jsonify({"ok": True})
+
+    data = request.get_json(force=True) or {}
+    pin = str(data.get("pin", ""))
+    # Constant-time compare so response timing can't be used to guess the
+    # PIN character-by-character.
+    if pin and hmac.compare_digest(pin, ACCESS_PIN):
+        session.permanent = True
+        session["unlocked"] = True
+        return jsonify({"ok": True})
+
+    return jsonify({"ok": False, "error": "Incorrect PIN."}), 401
 
 
 @app.route("/api/info", methods=["POST"])
@@ -473,6 +583,7 @@ def info():
             "is_svg": is_svg,
             "formats": formats,
             "qualities": [],
+            "filesize": get_remote_filesize(url),
         })
 
     try:
@@ -481,6 +592,7 @@ def info():
             **base_ydl_opts(),
         }
         meta = extract_with_retry(url, ydl_opts, download=False)
+        qualities, audio_filesize = build_quality_options(meta)
         return jsonify({
             "title": meta.get("title") or "Untitled",
             "thumbnail": meta.get("thumbnail"),
@@ -490,7 +602,8 @@ def info():
             "is_image": False,
             "is_svg": False,
             "formats": [],
-            "qualities": build_quality_options(meta),
+            "qualities": qualities,
+            "audio_filesize": audio_filesize,
         })
     except Exception as e:
         # Not a site yt-dlp recognizes, and not a recognizable file
@@ -620,6 +733,12 @@ def _run_ytdlp_download(job_id, url, mode, quality):
 
 @app.route("/api/start", methods=["POST"])
 def start():
+    # Previewing a link's info (/api/info) is always free to use; only
+    # actually starting a download is gated behind the PIN, so browsing the
+    # UI never requires it.
+    if not is_unlocked():
+        return jsonify({"error": "PIN required to download.", "locked": True}), 401
+
     data = request.get_json(force=True) or {}
     url = (data.get("url") or "").strip()
     mode = data.get("mode", "auto")          # "auto" | "video" | "audio"

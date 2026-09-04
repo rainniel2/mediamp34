@@ -270,6 +270,133 @@
   }
   .dl-btn:hover{filter:brightness(1.08);}
 
+  .result-size{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11.5px;
+    color:var(--muted);
+    margin-top:3px;
+  }
+
+  /* --- unsupported/failed link error card ------------------------------ */
+  .error-card{
+    display:none;
+    margin-top:14px;
+    gap:12px;
+    align-items:flex-start;
+    background:rgba(226,104,92,0.08);
+    border:1px solid rgba(226,104,92,0.35);
+    border-radius:10px;
+    padding:14px 16px;
+  }
+  .error-card.show{display:flex;}
+  .error-icon{
+    flex-shrink:0;
+    width:26px;height:26px;
+    border-radius:50%;
+    background:rgba(226,104,92,0.18);
+    color:var(--red);
+    display:flex;align-items:center;justify-content:center;
+    font-size:14px;
+    font-weight:700;
+  }
+  .error-body{flex:1; min-width:0;}
+  .error-title{
+    font-size:13.5px;
+    font-weight:600;
+    color:var(--red);
+    margin-bottom:3px;
+  }
+  .error-msg{
+    font-size:12.5px;
+    color:var(--text);
+    opacity:0.85;
+    line-height:1.5;
+  }
+
+  /* --- PIN unlock modal -------------------------------------------------- */
+  .modal-overlay{
+    display:none;
+    position:fixed;
+    inset:0;
+    background:rgba(10,11,13,0.72);
+    align-items:center;
+    justify-content:center;
+    padding:20px;
+    z-index:100;
+  }
+  .modal-overlay.show{display:flex;}
+  .modal-card{
+    width:100%;
+    max-width:340px;
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:24px;
+    text-align:center;
+  }
+  .modal-icon{font-size:22px; margin-bottom:10px;}
+  .modal-title{
+    font-size:16px;
+    font-weight:700;
+    margin:0 0 6px;
+  }
+  .modal-sub{
+    font-size:12.5px;
+    color:var(--muted);
+    line-height:1.5;
+    margin:0 0 16px;
+  }
+  .modal-input{
+    width:100%;
+    padding:12px 14px;
+    background:var(--panel-2);
+    border:1px solid var(--line);
+    border-radius:10px;
+    color:var(--text);
+    font-family:'IBM Plex Mono',monospace;
+    font-size:16px;
+    letter-spacing:0.12em;
+    text-align:center;
+    outline:none;
+    box-sizing:border-box;
+  }
+  .modal-input:focus{border-color:var(--amber-dim);}
+  .modal-error{
+    min-height:16px;
+    margin-top:8px;
+    font-size:12px;
+    color:var(--red);
+  }
+  .modal-actions{
+    display:flex;
+    gap:8px;
+    margin-top:12px;
+  }
+  .modal-cancel{
+    flex:1;
+    padding:11px 0;
+    background:transparent;
+    border:1px solid var(--line);
+    border-radius:10px;
+    color:var(--muted);
+    font-weight:600;
+    font-size:13.5px;
+    cursor:pointer;
+  }
+  .modal-submit{
+    flex:1;
+    padding:11px 0;
+    border:none;
+    border-radius:10px;
+    background:var(--amber);
+    color:#1a1305;
+    font-weight:600;
+    font-size:13.5px;
+    cursor:pointer;
+  }
+  .modal-submit:hover{filter:brightness(1.08);}
+  .modal-submit:disabled{filter:brightness(0.85); cursor:not-allowed;}
+
   footer{
     margin-top:34px;
     color:#565b62;
@@ -315,14 +442,37 @@
       <div class="result-info">
         <div class="result-title" id="rtitle">Untitled</div>
         <div class="result-meta" id="rmeta"></div>
+        <div class="result-size" id="rsize"></div>
       </div>
       <button class="dl-btn" id="dlBtn">Save file</button>
+    </div>
+
+    <div class="error-card" id="errorCard">
+      <div class="error-icon">!</div>
+      <div class="error-body">
+        <div class="error-title">Can't grab that one</div>
+        <div class="error-msg" id="errorMsg"></div>
+      </div>
     </div>
   </div>
 
   <footer>
     Only download things you have the right to: your own uploads, content licensed for reuse, or files you own. Respect the source platform's terms.
   </footer>
+
+  <div class="modal-overlay" id="pinOverlay">
+    <div class="modal-card">
+      <div class="modal-icon">🔒</div>
+      <h2 class="modal-title">Enter PIN to download</h2>
+      <p class="modal-sub">This link is public — a quick PIN keeps random visitors from using it. You'll only need to do this once on this device.</p>
+      <input id="pinInput" type="password" class="modal-input" placeholder="PIN" autocomplete="off">
+      <div class="modal-error" id="pinError"></div>
+      <div class="modal-actions">
+        <button class="modal-cancel" id="pinCancel">Cancel</button>
+        <button class="modal-submit" id="pinSubmit">Unlock</button>
+      </div>
+    </div>
+  </div>
 
 <script>
   const urlInput = document.getElementById('url');
@@ -340,11 +490,26 @@
   const progressWrap = document.getElementById('progressWrap');
   const progressFill = document.getElementById('progressFill');
   const progressMeta = document.getElementById('progressMeta');
+  const rsize = document.getElementById('rsize');
+  const errorCard = document.getElementById('errorCard');
+  const errorMsg = document.getElementById('errorMsg');
+  const pinOverlay = document.getElementById('pinOverlay');
+  const pinInput = document.getElementById('pinInput');
+  const pinError = document.getElementById('pinError');
+  const pinSubmit = document.getElementById('pinSubmit');
+  const pinCancel = document.getElementById('pinCancel');
 
   let mode = 'auto';
   let currentUrl = '';
   let currentDirect = false;
+  let infoData = null;
   let pollTimer = null;
+
+  // Non-critical: just controls whether "Save file" shows a lock hint.
+  // The server enforces the PIN either way.
+  fetch('/api/config').then(r => r.json()).then(data => {
+    if(data.pin_required) dlBtn.textContent = '🔒 Save file';
+  }).catch(() => {});
 
   modeButtons.forEach(btn => {
     btn.addEventListener('click', () => {
@@ -352,8 +517,11 @@
       btn.classList.add('active');
       mode = btn.dataset.mode;
       qualitySelect.style.display = (mode === 'video' && qualitySelect.options.length) ? 'block' : 'none';
+      updateSizeDisplay();
     });
   });
+
+  qualitySelect.addEventListener('change', updateSizeDisplay);
 
   function setStatus(text, kind){
     statusEl.textContent = text || '';
@@ -376,6 +544,27 @@
     return formatBytes(bps) + '/s';
   }
 
+  // Direct file links get an exact Content-Length, so shown as-is; yt-dlp
+  // sites only ever report an estimate, so those get a "~" prefix.
+  function currentEstimatedSize(){
+    if(!infoData) return null;
+    if(infoData.direct){
+      return infoData.filesize ? formatBytes(infoData.filesize) : null;
+    }
+    if(mode === 'audio'){
+      return infoData.audio_filesize ? '~' + formatBytes(infoData.audio_filesize) : null;
+    }
+    const qualities = infoData.qualities || [];
+    const wanted = qualitySelect.value || (qualities[0] && qualities[0].value);
+    const match = qualities.find(q => q.value === wanted);
+    return (match && match.filesize) ? '~' + formatBytes(match.filesize) : null;
+  }
+
+  function updateSizeDisplay(){
+    const size = currentEstimatedSize();
+    rsize.textContent = size ? `Estimated size: ${size}` : '';
+  }
+
   function formatEta(sec){
     if(sec === null || sec === undefined) return '';
     const m = Math.floor(sec/60), s = Math.round(sec%60);
@@ -387,12 +576,15 @@
     if(!url){ setStatus('Paste a link first.', 'error'); return; }
     currentUrl = url;
     currentDirect = false;
+    infoData = null;
     resultEl.classList.remove('show');
+    errorCard.classList.remove('show');
     progressWrap.classList.remove('show');
     qualitySelect.style.display = 'none';
     qualitySelect.innerHTML = '';
     formatSelect.style.display = 'none';
     formatSelect.innerHTML = '';
+    rsize.textContent = '';
     setBusy(true);
     setStatus('Reading link…');
     try{
@@ -402,8 +594,15 @@
         body: JSON.stringify({url})
       });
       const data = await res.json();
-      if(!res.ok){ setStatus(data.error || 'Something went wrong.', 'error'); setBusy(false); return; }
+      if(!res.ok){
+        setStatus('');
+        errorMsg.textContent = data.error || "Something about that link didn't work.";
+        errorCard.classList.add('show');
+        setBusy(false);
+        return;
+      }
 
+      infoData = data;
       currentDirect = !!data.direct;
 
       rtitle.textContent = data.title || 'Untitled';
@@ -437,6 +636,8 @@
         });
         formatSelect.style.display = 'block';
       }
+
+      updateSizeDisplay();
     }catch(err){
       setStatus('Network error. Is the server running?', 'error');
     }
@@ -458,19 +659,39 @@
     progressMeta.textContent = '';
     setStatus('Starting…');
 
+    const startPayload = {
+      url: currentUrl,
+      mode,
+      quality: qualitySelect.value || 'best',
+      format: formatSelect.value || 'original',
+      direct: currentDirect
+    };
+
     try{
-      const startRes = await fetch('/api/start', {
+      let startRes = await fetch('/api/start', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({
-          url: currentUrl,
-          mode,
-          quality: qualitySelect.value || 'best',
-          format: formatSelect.value || 'original',
-          direct: currentDirect
-        })
+        body: JSON.stringify(startPayload)
       });
-      const startData = await startRes.json();
+      let startData = await startRes.json();
+
+      if(startRes.status === 401 && startData.locked){
+        const unlocked = await promptForPin();
+        if(!unlocked){
+          setStatus('PIN required to download.', 'error');
+          setBusy(false);
+          progressWrap.classList.remove('show');
+          return;
+        }
+        // Retry the same download now that this device is unlocked.
+        startRes = await fetch('/api/start', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(startPayload)
+        });
+        startData = await startRes.json();
+      }
+
       if(!startRes.ok){
         setStatus(startData.error || 'Could not start download.', 'error');
         setBusy(false);
@@ -483,6 +704,58 @@
       setBusy(false);
       progressWrap.classList.remove('show');
     }
+  }
+
+  // Shows the PIN modal and resolves once the user either unlocks
+  // successfully (true) or cancels (false). Wrong PINs just clear the
+  // field and let them try again — no lockout, kept intentionally simple.
+  function promptForPin(){
+    return new Promise((resolve) => {
+      pinError.textContent = '';
+      pinInput.value = '';
+      pinOverlay.classList.add('show');
+      pinInput.focus();
+
+      function cleanup(){
+        pinSubmit.removeEventListener('click', submit);
+        pinInput.removeEventListener('keydown', onKeydown);
+        pinCancel.removeEventListener('click', onCancel);
+        pinOverlay.classList.remove('show');
+      }
+
+      async function submit(){
+        const pin = pinInput.value;
+        if(!pin){ pinError.textContent = 'Enter the PIN.'; return; }
+        pinSubmit.disabled = true;
+        try{
+          const res = await fetch('/api/unlock', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({pin})
+          });
+          const data = await res.json();
+          pinSubmit.disabled = false;
+          if(res.ok && data.ok){
+            cleanup();
+            resolve(true);
+          } else {
+            pinError.textContent = data.error || 'Incorrect PIN.';
+            pinInput.value = '';
+            pinInput.focus();
+          }
+        }catch(err){
+          pinSubmit.disabled = false;
+          pinError.textContent = 'Network error. Try again.';
+        }
+      }
+
+      function onKeydown(e){ if(e.key === 'Enter') submit(); }
+      function onCancel(){ cleanup(); resolve(false); }
+
+      pinSubmit.addEventListener('click', submit);
+      pinInput.addEventListener('keydown', onKeydown);
+      pinCancel.addEventListener('click', onCancel);
+    });
   }
 
   function pollProgress(jobId){
@@ -556,11 +829,30 @@
       a.remove();
       URL.revokeObjectURL(objUrl);
       setStatus('Downloaded.', 'ok');
+      resetForNextDownload();
     }catch(err){
       setStatus('Network error retrieving the file.', 'error');
     }
     setBusy(false);
     progressWrap.classList.remove('show');
+  }
+
+  // Clears the input and puts the card back to its empty starting state
+  // (but leaves the "Downloaded." status message showing) so the next
+  // link can be pasted straight in without manually clearing anything.
+  function resetForNextDownload(){
+    urlInput.value = '';
+    currentUrl = '';
+    currentDirect = false;
+    infoData = null;
+    resultEl.classList.remove('show');
+    errorCard.classList.remove('show');
+    qualitySelect.style.display = 'none';
+    qualitySelect.innerHTML = '';
+    formatSelect.style.display = 'none';
+    formatSelect.innerHTML = '';
+    rsize.textContent = '';
+    urlInput.focus();
   }
 
   goBtn.addEventListener('click', fetchInfo);
