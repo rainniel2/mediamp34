@@ -284,7 +284,7 @@
 
   <div class="eyebrow">link in, file out</div>
   <h1>grab<span>it</span></h1>
-  <p class="sub">Paste a video, audio, or image link. Pick a format. Get the file, no accounts, no watermarks.</p>
+  <p class="sub">Paste a video, audio, image, or document link. Pick a format. Get the file, no accounts, no watermarks.</p>
 
   <div class="card">
     <div class="input-row">
@@ -343,6 +343,7 @@
 
   let mode = 'auto';
   let currentUrl = '';
+  let currentDirect = false;
   let pollTimer = null;
 
   modeButtons.forEach(btn => {
@@ -385,6 +386,7 @@
     const url = urlInput.value.trim();
     if(!url){ setStatus('Paste a link first.', 'error'); return; }
     currentUrl = url;
+    currentDirect = false;
     resultEl.classList.remove('show');
     progressWrap.classList.remove('show');
     qualitySelect.style.display = 'none';
@@ -402,11 +404,14 @@
       const data = await res.json();
       if(!res.ok){ setStatus(data.error || 'Something went wrong.', 'error'); setBusy(false); return; }
 
+      currentDirect = !!data.direct;
+
       rtitle.textContent = data.title || 'Untitled';
       rmeta.textContent = [
         data.uploader,
         data.duration ? formatDuration(data.duration) : null,
-        data.is_svg ? 'SVG vector image, saved as-is' : null
+        data.is_svg ? 'SVG vector image, saved as-is' : null,
+        (data.direct && !data.is_image && data.content_type) ? data.content_type : null
       ].filter(Boolean).join(' · ') || 'Ready to download';
       thumb.src = data.thumbnail || '';
       thumb.style.display = data.thumbnail ? 'block' : 'none';
@@ -461,7 +466,8 @@
           url: currentUrl,
           mode,
           quality: qualitySelect.value || 'best',
-          format: formatSelect.value || 'original'
+          format: formatSelect.value || 'original',
+          direct: currentDirect
         })
       });
       const startData = await startRes.json();

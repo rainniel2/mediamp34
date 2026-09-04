@@ -12,6 +12,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# yt-dlp's extractor breaks against YouTube every few weeks and gets patched
+# just as fast — but the layer above only reruns pip install when
+# requirements.txt itself changes, so an ordinary code push would otherwise
+# keep reusing whatever yt-dlp version was cached from the last build.
+# Putting this AFTER "COPY . ." means it reruns (and fetches the latest
+# release) on every deploy that changes any file in the repo, which is
+# every normal push, without needing "Clear build cache & Deploy".
+RUN pip install --no-cache-dir -U "yt-dlp[default]"
+
 ENV PORT=10000
 EXPOSE 10000
 

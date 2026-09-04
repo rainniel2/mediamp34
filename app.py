@@ -3,6 +3,7 @@ import re
 import json
 import time
 import uuid
+import mimetypes
 import threading
 import tempfile
 from datetime import datetime
@@ -18,6 +19,8 @@ app = Flask(__name__)
 
 # Raster formats we can actually convert between with Pillow. SVG is vector,
 # so it's handled separately (passthrough only — no rasterizing/vectorizing).
+# PDF is here too: Pillow can wrap a single raster image as a one-page PDF,
+# which covers "turn this image into a PDF" without needing extra libraries.
 CONVERTIBLE_IMAGE_FORMATS = {
     "png": "PNG",
     "jpg": "JPEG",
@@ -25,9 +28,28 @@ CONVERTIBLE_IMAGE_FORMATS = {
     "webp": "WEBP",
     "bmp": "BMP",
     "gif": "GIF",
+    "pdf": "PDF",
 }
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
 SVG_EXT = ".svg"
+
+# Non-media "just give me the file" extensions: documents, archives, and
+# other everyday file types that should skip yt-dlp entirely and stream
+# straight through, the same way a direct image/video link already does.
+DOCUMENT_EXTS = (
+    ".pdf", ".doc", ".docx", ".odt", ".rtf", ".txt", ".csv", ".json", ".xml",
+    ".xls", ".xlsx", ".ods", ".ppt", ".pptx", ".odp",
+    ".zip", ".rar", ".7z", ".tar", ".gz", ".apk", ".exe", ".dmg",
+    ".epub", ".mobi",
+)
+
+# Content-Types (as returned by a server, sans any ";charset=..." suffix)
+# that mean "this is a real webpage", not a downloadable file. Anything else
+# non-HTML-ish is treated as a file when we have to guess from the network
+# instead of the URL's extension.
+NON_FILE_CONTENT_TYPES = {
+    "text/html", "application/xhtml+xml", "",
+}
 
 DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "grabit-downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -93,7 +115,9 @@ def convert_image(local_path, download_name, target_format):
         raise ValueError(f"unsupported format '{target_format}'")
 
     with Image.open(local_path) as img:
-        if pillow_fmt == "JPEG" and img.mode in ("RGBA", "LA", "P"):
+        # JPEG and PDF (via Pillow) can't carry an alpha channel or a
+        # palette, so flatten those onto plain RGB first.
+        if pillow_fmt in ("JPEG", "PDF") and img.mode in ("RGBA", "LA", "P"):
             img = img.convert("RGB")
         new_path = os.path.splitext(local_path)[0] + f".{target_format}"
         img.save(new_path, pillow_fmt)
@@ -106,6 +130,13 @@ def convert_image(local_path, download_name, target_format):
 
     base, _ = os.path.splitext(download_name)
     return new_path, f"{base}.{target_format}"
+
+
+def image_format_options():
+    """Dropdown options for converting a downloaded raster image on the way
+    out: 'original' plus every Pillow target we support, deduped so 'jpg'
+    doesn't show up twice (jpg/jpeg map to the same Pillow codec)."""
+    return ["original"] + sorted({f for f in CONVERTIBLE_IMAGE_FORMATS if f != "jpeg"})
 
 
 # Path to an optional cookies.txt exported from a browser that's signed in
@@ -254,14 +285,29 @@ def resolved_cookies_file():
 
 def base_ydl_opts():
     """
-    Options shared by every yt-dlp call. YouTube increasingly blocks the
-    default "web" client as a bot; asking for the tv/web_safari/android
-    clients first avoids that in most cases without needing cookies at all.
-    If a cookies.txt is present, it's used as a fallback for the harder cases.
+    Options shared by every yt-dlp call.
+
+    We deliberately do NOT hardcode which YouTube "client" (web/tv/android/
+    etc.) to pretend to be. YouTube's bot checks and PO-token requirements
+    shift every few weeks, and yt-dlp's maintainers update its *default*
+    client list with every release to match whatever currently works best.
+    Since the Dockerfile always installs the latest yt-dlp on every deploy
+    (see comment there), leaning on that default keeps this self-updating
+    instead of quietly going stale like a client list pinned here would.
+
+    Set YTDLP_PLAYER_CLIENT (comma-separated, e.g. "tv,web_safari,android")
+    to force a specific client list if you hit a case where the default
+    genuinely does worse — see README.
+
+    If a cookies.txt is present, it's used as a fallback for the harder
+    cases (age/region-gated videos, or when an IP gets rate-limited).
     """
-    opts = {
-        "extractor_args": {"youtube": {"player_client": ["tv", "web_safari", "android"]}},
-    }
+    opts = {}
+    player_client = os.environ.get("YTDLP_PLAYER_CLIENT", "").strip()
+    if player_client:
+        opts["extractor_args"] = {
+            "youtube": {"player_client": [c.strip() for c in player_client.split(",") if c.strip()]}
+        }
     cookies_path = resolved_cookies_file()
     if cookies_path:
         opts["cookiefile"] = cookies_path
@@ -269,14 +315,106 @@ def base_ydl_opts():
 
 
 def looks_like_direct_file(url):
-    """Quick check for links that just point straight at a media/image file."""
+    """Quick, offline check for links that just point straight at a file —
+    media, image, or any everyday document/archive type — based on the
+    extension alone. This is the fast path; probe_direct_url() below is the
+    fallback for links that don't carry a recognizable extension."""
     path = urlparse(url).path.lower()
     return path.endswith((
         ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",
         ".mp4", ".mov", ".webm", ".mkv",
         ".mp3", ".wav", ".ogg", ".m4a", ".flac",
-        ".pdf",
-    ))
+    ) + DOCUMENT_EXTS)
+
+
+def probe_direct_url(url, timeout=10):
+    """
+    Last-resort check for a link that yt-dlp couldn't make sense of and that
+    doesn't have a recognizable extension either (a CDN link with a hashed
+    filename and no extension, for example). Ask the server what it
+    actually is via the Content-Type header: if it's not a webpage, treat it
+    as a plain file to download as-is. Returns None for anything that looks
+    like a genuine webpage yt-dlp just doesn't support.
+    """
+    try:
+        r = requests.head(url, timeout=timeout, allow_redirects=True)
+        content_type = r.headers.get("Content-Type", "")
+        if r.status_code >= 400 or not content_type:
+            # Some servers don't answer HEAD requests properly; fall back to
+            # a tiny ranged GET instead of downloading the whole thing.
+            r = requests.get(
+                url, timeout=timeout, stream=True,
+                headers={"Range": "bytes=0-0"},
+            )
+            content_type = r.headers.get("Content-Type", "")
+        r.close()
+    except requests.exceptions.RequestException:
+        return None
+
+    content_type = content_type.split(";")[0].strip().lower()
+    if content_type in NON_FILE_CONTENT_TYPES:
+        return None
+
+    path_name = os.path.basename(urlparse(url).path)
+    ext = os.path.splitext(path_name)[1].lower()
+    if not ext:
+        ext = mimetypes.guess_extension(content_type) or ""
+        path_name = (path_name or "file") + ext
+
+    is_raster_image = content_type.startswith("image/") and ext.lstrip(".") in CONVERTIBLE_IMAGE_FORMATS
+    is_svg = content_type == "image/svg+xml" or ext == SVG_EXT
+
+    return {
+        "title": path_name,
+        "thumbnail": url if (is_raster_image or is_svg) else None,
+        "duration": None,
+        "uploader": None,
+        "direct": True,
+        "is_image": is_raster_image or is_svg,
+        "is_svg": is_svg,
+        "formats": image_format_options() if is_raster_image else [],
+        "qualities": [],
+        "content_type": content_type or None,
+    }
+
+
+# Tried automatically, once, if the default client selection hits YouTube's
+# bot-check/PO-token wall and the operator hasn't already forced a specific
+# client via YTDLP_PLAYER_CLIENT. Mixes clients with different PO-token
+# requirements so at least one is likely to still hand back usable formats.
+AUTO_FALLBACK_PLAYER_CLIENTS = ["web_safari", "tv", "android_vr", "android"]
+
+
+def _looks_like_botcheck(exc):
+    msg = str(exc).lower()
+    return (
+        ("confirm you" in msg and "bot" in msg)
+        or "po token" in msg
+        or "requires a token" in msg
+        or "the following content is not available" in msg
+    )
+
+
+def extract_with_retry(url, ydl_opts, download=False):
+    """
+    Run a yt-dlp extraction/download with the given options, and if it hits
+    YouTube's bot-check/PO-token wall, retry once with a broader mix of
+    player clients (AUTO_FALLBACK_PLAYER_CLIENTS) before giving up. Skipped
+    if YTDLP_PLAYER_CLIENT is set — that's an explicit operator choice we
+    shouldn't second-guess.
+    """
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=download)
+    except Exception as e:
+        if os.environ.get("YTDLP_PLAYER_CLIENT", "").strip() or not _looks_like_botcheck(e):
+            raise
+        retry_opts = dict(ydl_opts)
+        retry_opts["extractor_args"] = {
+            "youtube": {"player_client": list(AUTO_FALLBACK_PLAYER_CLIENTS)}
+        }
+        with yt_dlp.YoutubeDL(retry_opts) as ydl:
+            return ydl.extract_info(url, download=download)
 
 
 def build_quality_options(meta):
@@ -323,11 +461,7 @@ def info():
         is_raster_image = ext in IMAGE_EXTS
         is_image = is_raster_image or is_svg
 
-        formats = []
-        if is_raster_image:
-            formats = ["original"] + sorted(
-                {f for f in CONVERTIBLE_IMAGE_FORMATS if f != "jpeg"}
-            )
+        formats = image_format_options() if is_raster_image else []
 
         return jsonify({
             "title": filename,
@@ -346,8 +480,7 @@ def info():
             "quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True,
             **base_ydl_opts(),
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            meta = ydl.extract_info(url, download=False)
+        meta = extract_with_retry(url, ydl_opts, download=False)
         return jsonify({
             "title": meta.get("title") or "Untitled",
             "thumbnail": meta.get("thumbnail"),
@@ -360,6 +493,13 @@ def info():
             "qualities": build_quality_options(meta),
         })
     except Exception as e:
+        # Not a site yt-dlp recognizes, and not a recognizable file
+        # extension either — last resort, ask the server what it actually
+        # is (a PDF/zip/doc/etc. with a hashed CDN filename, say) before
+        # giving up with an error.
+        probed = probe_direct_url(url)
+        if probed:
+            return jsonify(probed)
         return jsonify({"error": friendly_error(e)}), 400
 
 
@@ -369,6 +509,9 @@ def _run_direct_download(job_id, url, target_format=None):
         r.raise_for_status()
         total = int(r.headers.get("Content-Length") or 0)
         ext = os.path.splitext(urlparse(url).path)[1] or ""
+        if not ext:
+            content_type = r.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            ext = mimetypes.guess_extension(content_type) or ""
         local_path = os.path.join(DOWNLOAD_DIR, f"{job_id}{ext}")
 
         done = 0
@@ -456,14 +599,14 @@ def _run_ytdlp_download(job_id, url, mode, quality):
         })
 
     try:
+        meta = extract_with_retry(url, ydl_opts, download=True)
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            meta = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(meta)
-            if mode == "audio":
-                base, _ = os.path.splitext(filename)
-                candidate = base + ".mp3"
-                if os.path.exists(candidate):
-                    filename = candidate
+        if mode == "audio":
+            base, _ = os.path.splitext(filename)
+            candidate = base + ".mp3"
+            if os.path.exists(candidate):
+                filename = candidate
 
         if not os.path.exists(filename):
             _set_job(job_id, status="error", error="Download finished but the file went missing. Try again.")
@@ -481,7 +624,11 @@ def start():
     url = (data.get("url") or "").strip()
     mode = data.get("mode", "auto")          # "auto" | "video" | "audio"
     quality = data.get("quality", "best")    # e.g. "1080", "720", "best"
-    img_format = data.get("format", "original")  # "original" | "png" | "jpg" | ...
+    img_format = data.get("format", "original")  # "original" | "png" | "jpg" | "pdf" | ...
+    # /api/info already worked out whether this is a direct file (including
+    # the extensionless/probed case) — trust that if the client sent it,
+    # rather than re-deciding from the extension alone and losing the probe.
+    direct_hint = data.get("direct")
 
     if not url:
         return jsonify({"error": "Paste a link first."}), 400
@@ -494,7 +641,8 @@ def start():
             "created": time.time(),
         }
 
-    if looks_like_direct_file(url) and mode != "audio":
+    is_direct = bool(direct_hint) if direct_hint is not None else looks_like_direct_file(url)
+    if is_direct and mode != "audio":
         t = threading.Thread(target=_run_direct_download, args=(job_id, url, img_format), daemon=True)
     else:
         t = threading.Thread(target=_run_ytdlp_download, args=(job_id, url, mode, quality), daemon=True)

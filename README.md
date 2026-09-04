@@ -1,7 +1,9 @@
 # grabit
 
 A tiny local website: paste a link, pick Auto / Video / Audio, get the file.
-Works on direct image/video/audio links and on most sites `yt-dlp` supports.
+Works on direct image/video/audio/document links, on most sites `yt-dlp`
+supports, and as a generic "just download whatever this link points to"
+fallback for anything else (PDFs, Office docs, zips, APKs, you name it).
 
 ## 1. Install requirements
 
@@ -40,9 +42,17 @@ Open **http://localhost:5000** in your browser.
 2. Choose **Auto** (best available), **Video**, or **Audio (MP3)**.
 3. Click **Download** to preview the title/thumbnail. For direct image links
    (jpg, png, gif, webp, bmp, svg) a **format** dropdown appears so you can
-   convert the image to PNG, JPG, WEBP, BMP, or GIF on the way out. SVGs are
-   vector files and are always saved as-is.
+   convert the image to PNG, JPG, WEBP, BMP, GIF, or **PDF** on the way out.
+   SVGs are vector files and are always saved as-is.
 4. Click **Save file**, the file saves through your browser's normal download.
+
+**Documents, archives, and other non-media files** (PDF, Word/Excel/
+PowerPoint, ZIP, APK, EPUB, etc.) work the same way — paste the link, click
+Download, then Save file. There's no format conversion for these (a ZIP
+stays a ZIP), just a clean pass-through download. If the link doesn't have
+a recognizable extension (a hashed CDN URL, say) and isn't a site `yt-dlp`
+recognizes, the app asks the server what the file actually is via its
+`Content-Type` before giving up.
 
 ## Notes
 
@@ -60,13 +70,34 @@ Open **http://localhost:5000** in your browser.
 ## "Sign in to confirm you're not a bot" (YouTube)
 
 YouTube has stepped up bot detection, especially for requests coming from
-server/cloud IPs rather than a home internet connection. This app already
-tries a couple of workarounds automatically (asking YouTube for its TV/Safari
-app clients instead of the regular website client, which usually avoids the
-check entirely). If it still shows up:
+server/cloud IPs rather than a home internet connection, and it's rolling
+out a "PO Token" requirement on top of that for more and more of its
+internal "clients" (web, android, tv, etc.). This app handles it in three
+layers, each kicking in only if the one before it wasn't enough:
+
+1. **yt-dlp's own defaults.** The app doesn't hardcode which client to
+   pretend to be — yt-dlp's maintainers update that default every release to
+   match whatever currently dodges YouTube's checks best, and this app
+   always installs the latest yt-dlp on every deploy (see the Dockerfile
+   note below), so that stays current on its own.
+2. **An automatic one-time retry.** If a download still hits the bot-check
+   wall, the app automatically retries once with a broader mix of clients
+   (`web_safari`, `tv`, `android_vr`, `android`) before giving up.
+3. **Cookies**, for the cases neither of the above can get past (age/region
+   gated videos, or an IP that's been rate-limited hard). See below.
+
+If you want to force a specific client yourself instead of relying on (1)
+and (2) — e.g. you've found one that reliably works for your use case — set
+the `YTDLP_PLAYER_CLIENT` environment variable to a comma-separated list,
+e.g. `YTDLP_PLAYER_CLIENT=tv,web_safari,android`. This disables the
+automatic retry, since at that point you've made an explicit choice.
+
+If it still shows up after all of that:
 
 1. Update `yt-dlp`: `pip install -U yt-dlp`. YouTube changes things often and
-   old versions break first.
+   old versions break first. (On the deployed version, this now happens
+   automatically on every push — see the Dockerfile note under "The page
+   needs to be reloaded" below.)
 2. As a fallback, export cookies from a browser where you're signed in to
    YouTube (an extension like "Get cookies.txt LOCALLY" works well), save the
    file as `cookies.txt`, and drop it in the same folder as `app.py` (or set
@@ -92,19 +123,21 @@ YouTube periodically changes something in its player that breaks the current
 `yt-dlp` update, usually within a day or two of it starting.
 
 This app already depends on `yt-dlp[default]`, which includes the
-`yt-dlp-ejs` package YouTube's playback checks now require. If you still hit
-this error on a deployed instance, it almost always means the deployed image
-is running an **older, cached** `yt-dlp` build rather than actually missing
-a fix:
+`yt-dlp-ejs` package YouTube's playback checks now require. The Dockerfile
+also has a dedicated `pip install -U "yt-dlp[default]"` step positioned
+*after* the app code is copied in, so it re-runs and grabs whatever the
+latest release is on every deploy that changes any file in the repo — which
+is every normal push. You shouldn't need to manually clear the build cache
+for yt-dlp staleness anymore.
 
-1. On Render, use **Manual Deploy > Clear build cache & deploy** instead of
-   a normal deploy. Docker layer caching means a routine redeploy can reuse
-   the old `pip install` layer and keep the stale version even after
-   `yt-dlp` has released a fix.
+If you still hit this error on a deployed instance:
+
+1. Trigger a **Manual Deploy > Clear build cache & deploy** on Render just
+   in case (covers the base OS/ffmpeg layer, though that rarely goes stale).
 2. Locally, run `pip install -U "yt-dlp[default]"` and try again.
 3. If it's still broken right after updating, it's a live yt-dlp bug;
    check https://github.com/yt-dlp/yt-dlp/issues for the current status.
-3. If you're deploying to a cloud host (Render, Railway, etc.), the block is
+4. If you're deploying to a cloud host (Render, Railway, etc.), the block is
    often tied to that provider's IP range being flagged, not your code, so it
    may pass locally but fail once deployed.
 
