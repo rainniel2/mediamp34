@@ -109,11 +109,17 @@ def schedule_cleanup(path, delay=120):
 
 def friendly_error(e):
     """
-    Turn a raw exception into something short enough to show in the UI
-    instead of a wall of yt-dlp/requests internals.
+    Turn a raw exception into something short enough to show in the UI.
+
+    Written for whoever's *using* the site, not whoever's running it — no
+    filenames, no README pointers, no yt-dlp/library jargon. The original,
+    technical message still gets logged (see below) so the owner can
+    actually diagnose things from Render's logs; visitors just never see it.
     """
     msg = str(e).strip()
     low = msg.lower()
+    app.logger.warning("download failed: %s", msg)
+
     if "404" in msg or "not found" in low:
         return "That link doesn't exist (404, not found)."
     if "403" in msg or "forbidden" in low:
@@ -125,17 +131,8 @@ def friendly_error(e):
                  "video, or document.")
     if "unable to download webpage" in low or "name or service not known" in low:
         return "Couldn't reach that link. Check the URL and try again."
-    if "confirm you" in low and "bot" in low:
-        return ("YouTube is asking for a sign-in check on this video/IP. "
-                "Add a cookies.txt file next to app.py (see README) and try again.")
-    if "netscape format" in low:
-        return ("cookies.txt isn't in a format yt-dlp can read (wrong export type, "
-                "or edited by hand). Re-export it fresh with \"Get cookies.txt LOCALLY\" "
-                "and don't open/save it in another editor first.")
-    if "needs to be reloaded" in low:
-        return ("YouTube changed something on their end that broke this yt-dlp "
-                "version. This is fixed by updating yt-dlp, not by anything in this "
-                "app's code, see README for how to force a fresh build.")
+    if ("confirm you" in low and "bot" in low) or "netscape format" in low or "needs to be reloaded" in low:
+        return "YouTube isn't letting this one through right now. Try again in a bit, or try a different video."
     # yt-dlp errors sometimes end with a long "report this issue" tail; drop it.
     msg = msg.split("; please report")[0].strip()
     return msg if len(msg) <= 160 else msg[:157] + "..."
