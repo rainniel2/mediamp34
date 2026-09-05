@@ -1,5 +1,4 @@
-flask
-yt-dlp[default]
-requests
-gunicorn
-Pillow
+Flask>=3.1,<4
+requests>=2.32,<3
+gunicorn>=23,<24
+yt-dlp[default,curl-cffi]

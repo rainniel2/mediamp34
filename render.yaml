@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: mediamp34
+    env: docker
+    healthCheckPath: /healthz
+    plan: free
+    autoDeploy: true
