@@ -1,52 +1,863 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MediaMP34</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>grabit: paste a link, get the file</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#101214;--panel:#191c20;--panel2:#20242a;--line:#2b3038;--text:#eef0f2;--muted:#8d949d;--accent:#f1aa42;--good:#54d3a3;--bad:#e46b60}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at top,#171b20 0,#101214 45%);color:var(--text);font:15px/1.5 Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:flex;justify-content:center;padding:7vh 18px 60px}.wrap{width:min(640px,100%)}.eyebrow{font:12px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);letter-spacing:.16em;text-transform:uppercase;text-align:center;margin-bottom:12px}.logo{text-align:center;font-weight:800;font-size:clamp(32px,7vw,48px);letter-spacing:-.04em;margin:0}.logo b{color:var(--accent)}.sub{text-align:center;color:var(--muted);margin:8px auto 30px;max-width:520px}.card{background:rgba(25,28,32,.96);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 18px 45px #0005}.input{display:flex;gap:10px;align-items:center;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:0 10px 0 14px}.input span{color:var(--accent);font-family:ui-monospace,monospace}.input input{width:100%;padding:15px 0;border:0;outline:0;background:transparent;color:var(--text);font-size:14px}.modes{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:12px}.modes button,.primary,.save,.pin-btn,.cancel{border:1px solid var(--line);border-radius:10px;padding:11px 10px;background:transparent;color:var(--muted);cursor:pointer;font-weight:700}.modes button.active{background:var(--accent);border-color:var(--accent);color:#1a1408}.row{display:flex;gap:10px;margin-top:12px}.select{flex:1;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:10px;padding:11px}.primary{width:100%;margin-top:12px;background:var(--accent);border-color:var(--accent);color:#1a1408}.primary:disabled,.save:disabled{opacity:.55;cursor:not-allowed}.status{min-height:22px;text-align:center;margin-top:12px;color:var(--muted)}.status.bad{color:var(--bad)}.status.good{color:var(--good)}.result{display:none;margin-top:15px;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--panel2);gap:12px;align-items:center}.result.show{display:flex}.thumb{width:132px;height:74px;object-fit:cover;border-radius:8px;background:#111}.info{min-width:0;flex:1}.title{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta,.size{color:var(--muted);font-size:12px;margin-top:4px}.save{margin-top:10px;width:100%;background:#242a31;color:var(--text)}.progress{display:none;margin-top:12px}.progress.show{display:block}.track{height:8px;background:#111;border-radius:99px;overflow:hidden}.fill{height:100%;width:0;background:var(--accent);transition:width .2s}.pmeta{text-align:center;color:var(--muted);font:12px ui-monospace,monospace;margin-top:6px}.modal{position:fixed;inset:0;background:#0009;display:none;align-items:center;justify-content:center;padding:18px}.modal.show{display:flex}.modal-box{width:min(360px,100%);background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px}.modal h2{margin:0 0 8px}.modal p{margin:0;color:var(--muted);font-size:13px}.pin{width:100%;margin-top:14px;background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:12px;border-radius:10px;outline:0}.pin-actions{display:flex;gap:8px;margin-top:10px}.pin-btn{flex:1;background:var(--accent);color:#1a1408;border-color:var(--accent)}.cancel{flex:1}.pin-error{min-height:18px;color:var(--bad);font-size:12px;margin-top:7px}footer{text-align:center;color:#5e646d;font-size:12px;margin-top:24px}
-@media(max-width:560px){.result{align-items:flex-start;flex-wrap:wrap}.thumb{width:100%;height:170px}.save{flex-basis:100%}.modes{grid-template-columns:1fr}.row{flex-direction:column}}
+  :root{
+    --ink:#15171a;
+    --panel:#1c1f23;
+    --panel-2:#22262b;
+    --line:#2b2f35;
+    --text:#eceae6;
+    --muted:#8b9098;
+    --amber:#f2a93b;
+    --amber-dim:#7a5a26;
+    --teal:#4fd1a5;
+    --red:#e2685c;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--ink);
+    color:var(--text);
+    font-family:'Inter',system-ui,sans-serif;
+    min-height:100vh;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    padding:8vh 20px 60px;
+  }
+  .eyebrow{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:12px;
+    letter-spacing:0.18em;
+    text-transform:uppercase;
+    color:var(--amber);
+    margin-bottom:14px;
+  }
+  h1{
+    font-size:clamp(28px,4vw,42px);
+    margin:0 0 8px;
+    font-weight:700;
+    letter-spacing:-0.02em;
+  }
+  h1 span{color:var(--amber);}
+  .sub{
+    color:var(--muted);
+    font-size:15px;
+    margin:0 0 40px;
+    text-align:center;
+    max-width:440px;
+    line-height:1.5;
+  }
+  .card{
+    width:100%;
+    max-width:560px;
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:22px;
+  }
+  .input-row{
+    display:flex;
+    align-items:center;
+    background:var(--panel-2);
+    border:1px solid var(--line);
+    border-radius:10px;
+    padding:0 6px 0 16px;
+    transition:border-color .15s ease;
+  }
+  .input-row:focus-within{
+    border-color:var(--amber-dim);
+  }
+  .prompt{
+    font-family:'IBM Plex Mono',monospace;
+    color:var(--amber);
+    font-size:15px;
+    margin-right:8px;
+    user-select:none;
+  }
+  input#url{
+    flex:1;
+    background:transparent;
+    border:none;
+    outline:none;
+    color:var(--text);
+    font-family:'IBM Plex Mono',monospace;
+    font-size:14px;
+    padding:14px 4px;
+  }
+  input#url::placeholder{color:#565b62;}
+  .bars{
+    display:flex;
+    align-items:center;
+    gap:3px;
+    height:20px;
+    margin-right:10px;
+    opacity:0.5;
+  }
+  .bars span{
+    width:3px;
+    background:var(--amber);
+    border-radius:2px;
+    height:6px;
+    transition:height .18s ease;
+  }
+  .bars.active span{ animation: pulse 0.9s ease-in-out infinite; }
+  .bars span:nth-child(1){animation-delay:0s;}
+  .bars span:nth-child(2){animation-delay:.12s;}
+  .bars span:nth-child(3){animation-delay:.24s;}
+  .bars span:nth-child(4){animation-delay:.36s;}
+  @keyframes pulse{
+    0%,100%{height:6px;}
+    50%{height:18px;}
+  }
+
+  .modes{
+    display:flex;
+    gap:6px;
+    margin:16px 0;
+    background:var(--panel-2);
+    border:1px solid var(--line);
+    border-radius:10px;
+    padding:4px;
+  }
+  .modes button{
+    flex:1;
+    padding:9px 0;
+    background:transparent;
+    border:none;
+    border-radius:7px;
+    color:var(--muted);
+    font-family:'IBM Plex Mono',monospace;
+    font-size:12.5px;
+    letter-spacing:.03em;
+    cursor:pointer;
+    transition:background .15s ease, color .15s ease;
+  }
+  .modes button.active{
+    background:var(--amber);
+    color:#1a1305;
+    font-weight:600;
+  }
+
+  .quality-select{
+    width:100%;
+    padding:11px 12px;
+    margin-bottom:14px;
+    background:var(--panel-2);
+    border:1px solid var(--line);
+    border-radius:10px;
+    color:var(--text);
+    font-family:'IBM Plex Mono',monospace;
+    font-size:13px;
+    outline:none;
+  }
+
+  .progress-wrap{
+    display:none;
+    margin-top:14px;
+  }
+  .progress-wrap.show{display:block;}
+  .progress-track{
+    width:100%;
+    height:8px;
+    background:var(--panel-2);
+    border:1px solid var(--line);
+    border-radius:6px;
+    overflow:hidden;
+  }
+  .progress-fill{
+    height:100%;
+    width:0%;
+    background:var(--amber);
+    transition:width .25s ease;
+  }
+  .progress-fill.indeterminate{
+    width:40%;
+    animation:indet 1.2s ease-in-out infinite;
+  }
+  @keyframes indet{
+    0%{transform:translateX(-100%);}
+    100%{transform:translateX(250%);}
+  }
+  .progress-meta{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11.5px;
+    color:var(--muted);
+    margin-top:6px;
+    display:flex;
+    justify-content:space-between;
+  }
+
+  .go{
+    width:100%;
+    padding:13px 0;
+    border:none;
+    border-radius:10px;
+    background:var(--amber);
+    color:#1a1305;
+    font-weight:600;
+    font-size:15px;
+    cursor:pointer;
+    transition:filter .15s ease, transform .05s ease;
+  }
+  .go:hover{filter:brightness(1.08);}
+  .go:active{transform:scale(0.99);}
+  .go:disabled{
+    background:var(--panel-2);
+    color:var(--muted);
+    cursor:not-allowed;
+  }
+
+  .status{
+    margin-top:14px;
+    font-family:'IBM Plex Mono',monospace;
+    font-size:12.5px;
+    color:var(--muted);
+    min-height:18px;
+    line-height:1.5;
+    white-space:normal;
+    overflow-wrap:anywhere;
+    word-break:break-word;
+  }
+  .status.error{color:var(--red);}
+  .status.ok{color:var(--teal);}
+
+  .result{
+    display:none;
+    margin-top:18px;
+    border-top:1px solid var(--line);
+    padding-top:18px;
+  }
+  .result.show{display:flex; gap:14px; align-items:center;}
+  .result img{
+    width:76px;height:76px;
+    object-fit:cover;
+    border-radius:8px;
+    background:var(--panel-2);
+    flex-shrink:0;
+  }
+  .result-info{flex:1; min-width:0;}
+  .result-title{
+    font-size:14px;
+    font-weight:600;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+  .result-meta{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11.5px;
+    color:var(--muted);
+    margin-top:3px;
+  }
+  .dl-btn{
+    background:var(--teal);
+    color:#0c1f18;
+    border:none;
+    border-radius:8px;
+    padding:9px 16px;
+    font-weight:600;
+    font-size:13px;
+    cursor:pointer;
+    white-space:nowrap;
+    flex-shrink:0;
+  }
+  .dl-btn:hover{filter:brightness(1.08);}
+
+  .result-size{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11.5px;
+    color:var(--muted);
+    margin-top:3px;
+  }
+
+  /* --- unsupported/failed link error card ------------------------------ */
+  .error-card{
+    display:none;
+    margin-top:14px;
+    gap:12px;
+    align-items:flex-start;
+    background:rgba(226,104,92,0.08);
+    border:1px solid rgba(226,104,92,0.35);
+    border-radius:10px;
+    padding:14px 16px;
+  }
+  .error-card.show{display:flex;}
+  .error-icon{
+    flex-shrink:0;
+    width:26px;height:26px;
+    border-radius:50%;
+    background:rgba(226,104,92,0.18);
+    color:var(--red);
+    display:flex;align-items:center;justify-content:center;
+    font-size:14px;
+    font-weight:700;
+  }
+  .error-body{flex:1; min-width:0;}
+  .error-title{
+    font-size:13.5px;
+    font-weight:600;
+    color:var(--red);
+    margin-bottom:3px;
+  }
+  .error-msg{
+    font-size:12.5px;
+    color:var(--text);
+    opacity:0.85;
+    line-height:1.5;
+  }
+
+  /* --- PIN unlock modal -------------------------------------------------- */
+  .modal-overlay{
+    display:none;
+    position:fixed;
+    inset:0;
+    background:rgba(10,11,13,0.72);
+    align-items:center;
+    justify-content:center;
+    padding:20px;
+    z-index:100;
+  }
+  .modal-overlay.show{display:flex;}
+  .modal-card{
+    width:100%;
+    max-width:340px;
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:24px;
+    text-align:center;
+  }
+  .modal-icon{font-size:22px; margin-bottom:10px;}
+  .modal-title{
+    font-size:16px;
+    font-weight:700;
+    margin:0 0 6px;
+  }
+  .modal-sub{
+    font-size:12.5px;
+    color:var(--muted);
+    line-height:1.5;
+    margin:0 0 16px;
+  }
+  .modal-input{
+    width:100%;
+    padding:12px 14px;
+    background:var(--panel-2);
+    border:1px solid var(--line);
+    border-radius:10px;
+    color:var(--text);
+    font-family:'IBM Plex Mono',monospace;
+    font-size:16px;
+    letter-spacing:0.12em;
+    text-align:center;
+    outline:none;
+    box-sizing:border-box;
+  }
+  .modal-input:focus{border-color:var(--amber-dim);}
+  .modal-error{
+    min-height:16px;
+    margin-top:8px;
+    font-size:12px;
+    color:var(--red);
+  }
+  .modal-actions{
+    display:flex;
+    gap:8px;
+    margin-top:12px;
+  }
+  .modal-cancel{
+    flex:1;
+    padding:11px 0;
+    background:transparent;
+    border:1px solid var(--line);
+    border-radius:10px;
+    color:var(--muted);
+    font-weight:600;
+    font-size:13.5px;
+    cursor:pointer;
+  }
+  .modal-submit{
+    flex:1;
+    padding:11px 0;
+    border:none;
+    border-radius:10px;
+    background:var(--amber);
+    color:#1a1305;
+    font-weight:600;
+    font-size:13.5px;
+    cursor:pointer;
+  }
+  .modal-submit:hover{filter:brightness(1.08);}
+  .modal-submit:disabled{filter:brightness(0.85); cursor:not-allowed;}
+
+  footer{
+    margin-top:34px;
+    color:#565b62;
+    font-size:12px;
+    text-align:center;
+    max-width:460px;
+    line-height:1.6;
+  }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="eyebrow">private media tool</div>
-  <h1 class="logo">Media<b>MP34</b></h1>
-  <p class="sub">Paste a YouTube link, choose video or MP3, then save the result directly to your device.</p>
-  <section class="card">
-    <div class="input"><span>&gt;</span><input id="url" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off" spellcheck="false"></div>
-    <div class="modes">
-      <button class="active" data-mode="video">VIDEO</button>
-      <button data-mode="audio">AUDIO (MP3)</button>
-      <button data-mode="auto">AUTO</button>
+
+  <div class="eyebrow">link in, file out</div>
+  <h1>grab<span>it</span></h1>
+  <p class="sub">Paste a video, audio, image, or document link. Pick a format. Get the file, no accounts, no watermarks.</p>
+
+  <div class="card">
+    <div class="input-row">
+      <span class="prompt">&gt;</span>
+      <input id="url" type="text" placeholder="https://example.com/watch?v=..." autocomplete="off" spellcheck="false">
+      <div class="bars" id="bars"><span></span><span></span><span></span><span></span></div>
     </div>
-    <div class="row"><select id="quality" class="select"><option value="best">Best available</option></select><select id="format" class="select" style="display:none"><option value="mp3">MP3 192 kbps</option></select></div>
-    <button id="go" class="primary">Analyze</button>
-    <div id="status" class="status"></div>
-    <div id="progress" class="progress"><div class="track"><div id="fill" class="fill"></div></div><div id="pmeta" class="pmeta"></div></div>
-    <div id="result" class="result"><img id="thumb" class="thumb" alt=""><div class="info"><div id="title" class="title"></div><div id="meta" class="meta"></div><div id="size" class="size"></div><button id="save" class="save">Save file</button></div></div>
-  </section>
-  <footer>Use only for media you are allowed to download. Temporary files are removed automatically.</footer>
-</div>
-<div id="modal" class="modal"><div class="modal-box"><h2>Private tool</h2><p>Enter the access PIN before starting a download.</p><input id="pin" class="pin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="PIN"><div id="pinError" class="pin-error"></div><div class="pin-actions"><button id="cancel" class="cancel">Cancel</button><button id="unlock" class="pin-btn">Unlock</button></div></div></div>
+
+    <div class="modes">
+      <button class="active" data-mode="auto">AUTO</button>
+      <button data-mode="video">VIDEO</button>
+      <button data-mode="audio">AUDIO (MP3)</button>
+    </div>
+
+    <select id="quality" class="quality-select" style="display:none;"></select>
+    <select id="format" class="quality-select" style="display:none;"></select>
+
+    <button class="go" id="go">Download</button>
+    <div class="status" id="status"></div>
+
+    <div class="progress-wrap" id="progressWrap">
+      <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="progress-meta" id="progressMeta"></div>
+    </div>
+
+    <div class="result" id="result">
+      <img id="thumb" src="" alt="">
+      <div class="result-info">
+        <div class="result-title" id="rtitle">Untitled</div>
+        <div class="result-meta" id="rmeta"></div>
+        <div class="result-size" id="rsize"></div>
+      </div>
+      <button class="dl-btn" id="dlBtn">Save file</button>
+    </div>
+
+    <div class="error-card" id="errorCard">
+      <div class="error-icon">!</div>
+      <div class="error-body">
+        <div class="error-title">Can't grab that one</div>
+        <div class="error-msg" id="errorMsg"></div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    Only download things you have the right to: your own uploads, content licensed for reuse, or files you own. Respect the source platform's terms.
+  </footer>
+
+  <div class="modal-overlay" id="pinOverlay">
+    <div class="modal-card">
+      <div class="modal-icon">🔒</div>
+      <h2 class="modal-title">Enter PIN to download</h2>
+      <p class="modal-sub">This link is public — a quick PIN keeps random visitors from using it. You'll only need to do this once on this device.</p>
+      <input id="pinInput" type="password" class="modal-input" placeholder="PIN" autocomplete="off">
+      <div class="modal-error" id="pinError"></div>
+      <div class="modal-actions">
+        <button class="modal-cancel" id="pinCancel">Cancel</button>
+        <button class="modal-submit" id="pinSubmit">Unlock</button>
+      </div>
+    </div>
+  </div>
+
 <script>
-const $=id=>document.getElementById(id);let mode='video',meta=null,job=null,poll=null,pinRequired=false;
-function status(t,kind=''){const e=$('status');e.textContent=t;e.className='status '+kind}
-function fmt(n){if(!n)return '';let v=n,u='B';if(v>1024){v/=1024;u='KB'}if(v>1024){v/=1024;u='MB'}if(v>1024){v/=1024;u='GB'}return `${v.toFixed(1)} ${u}`}
-function fmtTime(s){if(!s&&s!==0)return '';s=Math.round(s);const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=s%60;return h?`${h}:${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`:`${m}:${String(x).padStart(2,'0')}`}
-function setBusy(v){$('go').disabled=v;$('save').disabled=v}
-for(const b of document.querySelectorAll('.modes')) b;document.querySelectorAll('.modes button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.modes button').forEach(x=>x.classList.remove('active'));b.classList.add('active');mode=b.dataset.mode;$('quality').style.display=(mode==='audio')?'none':'block';$('format').style.display=(mode==='audio')?'block':'none';if(meta)renderMeta(meta)})
-function renderMeta(m){$('result').classList.add('show');$('title').textContent=m.title||'Untitled';$('meta').textContent=[m.uploader, m.duration?fmtTime(m.duration):''].filter(Boolean).join(' · ');$('thumb').src=m.thumbnail||'';$('thumb').style.display=m.thumbnail?'block':'none';if(mode==='audio')$('size').textContent=m.audio_filesize?`Estimated size: ${fmt(m.audio_filesize)}`:''}
-async function analyze(){const url=$('url').value.trim();if(!url){status('Paste a URL first','bad');return}setBusy(true);$('result').classList.remove('show');status('Analyzing link…');try{const r=await fetch('/api/info',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Could not analyze that link.');meta=d;const q=$('quality');q.innerHTML=(d.qualities||[{value:'best',label:'Best available'}]).map(x=>`<option value="${x.value}">${x.label}</option>`).join('');renderMeta(d);status('Ready to download','good');$('go').textContent='Download'}catch(e){status(e.message,'bad')}finally{setBusy(false)}}
-async function unlock(){const pin=$('pin').value;if(!pin){$('pinError').textContent='Enter the PIN.';return}$('unlock').disabled=true;try{const r=await fetch('/api/unlock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Incorrect PIN.');pinRequired=false;$('modal').classList.remove('show');await startDownload(true)}catch(e){$('pinError').textContent=e.message;$('pin').value='';$('pin').focus()}finally{$('unlock').disabled=false}}
-$('cancel').onclick=()=> $('modal').classList.remove('show');$('unlock').onclick=unlock;$('pin').addEventListener('keydown',e=>{if(e.key==='Enter')unlock()});
-async function startDownload(retry=false){const url=$('url').value.trim();if(!meta){await analyze();if(!meta)return}setBusy(true);$('progress').classList.add('show');$('fill').style.width='0%';$('pmeta').textContent='Starting…';status('Preparing download…');try{const r=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,mode:mode==='auto'?'video':mode,quality:$('quality').value})});const d=await r.json();if(r.status===401&&d.needs_pin&&!retry){$('modal').classList.add('show');setBusy(false);return}if(!r.ok)throw new Error(d.error||'Could not start download.');job=d.job_id;pollProgress()}catch(e){status(e.message,'bad');setBusy(false);$('progress').classList.remove('show')}}
-function pollProgress(){clearInterval(poll);poll=setInterval(async()=>{try{const r=await fetch('/api/progress/'+job);const d=await r.json();if(!r.ok)throw new Error(d.error||'Lost download job.');if(typeof d.percent==='number')$('fill').style.width=d.percent+'%';$('pmeta').textContent=d.stage==='processing'?'Processing with FFmpeg…':d.percent!=null?`${d.percent}%${d.speed?' · '+fmt(d.speed)+'/s':''}${d.eta!=null?' · ETA '+fmtTime(d.eta):''}`:'Working…';if(d.status==='ready'){clearInterval(poll);$('fill').style.width='100%';$('pmeta').textContent='Ready';status('Download ready','good');setBusy(false);$('save').disabled=false;job=d}else if(d.status==='error'){clearInterval(poll);throw new Error(d.error||'Download failed.')}}catch(e){clearInterval(poll);status(e.message,'bad');$('progress').classList.remove('show');setBusy(false)}} ,700)}
-$('save').onclick=()=>{if(!job||!job.job_id)return;window.location.href='/api/file/'+job.job_id};
-$('go').onclick=()=>{$('go').textContent==='Analyze'?analyze():startDownload()};$('url').addEventListener('keydown',e=>{if(e.key==='Enter')analyze()});
-fetch('/api/config').then(r=>r.json()).then(d=>{pinRequired=!!d.pin_required}).catch(()=>{});
+  const urlInput = document.getElementById('url');
+  const bars = document.getElementById('bars');
+  const goBtn = document.getElementById('go');
+  const statusEl = document.getElementById('status');
+  const resultEl = document.getElementById('result');
+  const thumb = document.getElementById('thumb');
+  const rtitle = document.getElementById('rtitle');
+  const rmeta = document.getElementById('rmeta');
+  const dlBtn = document.getElementById('dlBtn');
+  const modeButtons = document.querySelectorAll('.modes button');
+  const qualitySelect = document.getElementById('quality');
+  const formatSelect = document.getElementById('format');
+  const progressWrap = document.getElementById('progressWrap');
+  const progressFill = document.getElementById('progressFill');
+  const progressMeta = document.getElementById('progressMeta');
+  const rsize = document.getElementById('rsize');
+  const errorCard = document.getElementById('errorCard');
+  const errorMsg = document.getElementById('errorMsg');
+  const pinOverlay = document.getElementById('pinOverlay');
+  const pinInput = document.getElementById('pinInput');
+  const pinError = document.getElementById('pinError');
+  const pinSubmit = document.getElementById('pinSubmit');
+  const pinCancel = document.getElementById('pinCancel');
+
+  let mode = 'auto';
+  let currentUrl = '';
+  let currentDirect = false;
+  let infoData = null;
+  let pollTimer = null;
+
+  // Non-critical: just controls whether "Save file" shows a lock hint.
+  // The server enforces the PIN either way.
+  fetch('/api/config').then(r => r.json()).then(data => {
+    if(data.pin_required) dlBtn.textContent = '🔒 Save file';
+  }).catch(() => {});
+
+  modeButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      modeButtons.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      mode = btn.dataset.mode;
+      qualitySelect.style.display = (mode === 'video' && qualitySelect.options.length) ? 'block' : 'none';
+      updateSizeDisplay();
+    });
+  });
+
+  qualitySelect.addEventListener('change', updateSizeDisplay);
+
+  function setStatus(text, kind){
+    statusEl.textContent = text || '';
+    statusEl.className = 'status' + (kind ? ' ' + kind : '');
+  }
+
+  function setBusy(busy){
+    goBtn.disabled = busy;
+    bars.classList.toggle('active', busy);
+  }
+
+  function formatBytes(bytes){
+    if(!bytes) return '';
+    const mb = bytes / (1024*1024);
+    return mb >= 1000 ? (mb/1024).toFixed(1)+' GB' : mb.toFixed(1)+' MB';
+  }
+
+  function formatSpeed(bps){
+    if(!bps) return '';
+    return formatBytes(bps) + '/s';
+  }
+
+  // Direct file links get an exact Content-Length, so shown as-is; yt-dlp
+  // sites only ever report an estimate, so those get a "~" prefix.
+  function currentEstimatedSize(){
+    if(!infoData) return null;
+    if(infoData.direct){
+      return infoData.filesize ? formatBytes(infoData.filesize) : null;
+    }
+    if(mode === 'audio'){
+      return infoData.audio_filesize ? '~' + formatBytes(infoData.audio_filesize) : null;
+    }
+    const qualities = infoData.qualities || [];
+    const wanted = qualitySelect.value || (qualities[0] && qualities[0].value);
+    const match = qualities.find(q => q.value === wanted);
+    return (match && match.filesize) ? '~' + formatBytes(match.filesize) : null;
+  }
+
+  function updateSizeDisplay(){
+    const size = currentEstimatedSize();
+    rsize.textContent = size ? `Estimated size: ${size}` : '';
+  }
+
+  function formatEta(sec){
+    if(sec === null || sec === undefined) return '';
+    const m = Math.floor(sec/60), s = Math.round(sec%60);
+    return `${m}:${s.toString().padStart(2,'0')} left`;
+  }
+
+  async function fetchInfo(){
+    const url = urlInput.value.trim();
+    if(!url){ setStatus('Paste a link first.', 'error'); return; }
+    currentUrl = url;
+    currentDirect = false;
+    infoData = null;
+    resultEl.classList.remove('show');
+    errorCard.classList.remove('show');
+    progressWrap.classList.remove('show');
+    qualitySelect.style.display = 'none';
+    qualitySelect.innerHTML = '';
+    formatSelect.style.display = 'none';
+    formatSelect.innerHTML = '';
+    rsize.textContent = '';
+    setBusy(true);
+    setStatus('Reading link…');
+    try{
+      const res = await fetch('/api/info', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({url})
+      });
+      const data = await res.json();
+      if(!res.ok){
+        setStatus('');
+        errorMsg.textContent = data.error || "Something about that link didn't work.";
+        errorCard.classList.add('show');
+        setBusy(false);
+        return;
+      }
+
+      infoData = data;
+      currentDirect = !!data.direct;
+
+      rtitle.textContent = data.title || 'Untitled';
+      rmeta.textContent = [
+        data.uploader,
+        data.duration ? formatDuration(data.duration) : null,
+        data.is_svg ? 'SVG vector image, saved as-is' : null,
+        (data.direct && !data.is_image && data.content_type) ? data.content_type : null
+      ].filter(Boolean).join(' · ') || 'Ready to download';
+      thumb.src = data.thumbnail || '';
+      thumb.style.display = data.thumbnail ? 'block' : 'none';
+      resultEl.classList.add('show');
+      setStatus('Found it.', 'ok');
+
+      if(data.qualities && data.qualities.length){
+        data.qualities.forEach(q => {
+          const opt = document.createElement('option');
+          opt.value = q.value;
+          opt.textContent = q.label;
+          qualitySelect.appendChild(opt);
+        });
+        qualitySelect.style.display = (mode === 'video') ? 'block' : 'none';
+      }
+
+      if(data.formats && data.formats.length){
+        data.formats.forEach(f => {
+          const opt = document.createElement('option');
+          opt.value = f;
+          opt.textContent = f === 'original' ? 'Original format' : f.toUpperCase();
+          formatSelect.appendChild(opt);
+        });
+        formatSelect.style.display = 'block';
+      }
+
+      updateSizeDisplay();
+    }catch(err){
+      setStatus('Network error. Is the server running?', 'error');
+    }
+    setBusy(false);
+  }
+
+  function formatDuration(sec){
+    sec = Math.round(sec);
+    const m = Math.floor(sec/60), s = sec%60;
+    return `${m}:${s.toString().padStart(2,'0')}`;
+  }
+
+  async function doDownload(){
+    if(!currentUrl){ return; }
+    setBusy(true);
+    progressWrap.classList.add('show');
+    progressFill.classList.add('indeterminate');
+    progressFill.style.width = '';
+    progressMeta.textContent = '';
+    setStatus('Starting…');
+
+    const startPayload = {
+      url: currentUrl,
+      mode,
+      quality: qualitySelect.value || 'best',
+      format: formatSelect.value || 'original',
+      direct: currentDirect
+    };
+
+    try{
+      let startRes = await fetch('/api/start', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(startPayload)
+      });
+      let startData = await startRes.json();
+
+      if(startRes.status === 401 && startData.locked){
+        const unlocked = await promptForPin();
+        if(!unlocked){
+          setStatus('PIN required to download.', 'error');
+          setBusy(false);
+          progressWrap.classList.remove('show');
+          return;
+        }
+        // Retry the same download now that this device is unlocked.
+        startRes = await fetch('/api/start', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(startPayload)
+        });
+        startData = await startRes.json();
+      }
+
+      if(!startRes.ok){
+        setStatus(startData.error || 'Could not start download.', 'error');
+        setBusy(false);
+        progressWrap.classList.remove('show');
+        return;
+      }
+      pollProgress(startData.job_id);
+    }catch(err){
+      setStatus('Network error starting download.', 'error');
+      setBusy(false);
+      progressWrap.classList.remove('show');
+    }
+  }
+
+  // Shows the PIN modal and resolves once the user either unlocks
+  // successfully (true) or cancels (false). Wrong PINs just clear the
+  // field and let them try again — no lockout, kept intentionally simple.
+  function promptForPin(){
+    return new Promise((resolve) => {
+      pinError.textContent = '';
+      pinInput.value = '';
+      pinOverlay.classList.add('show');
+      pinInput.focus();
+
+      function cleanup(){
+        pinSubmit.removeEventListener('click', submit);
+        pinInput.removeEventListener('keydown', onKeydown);
+        pinCancel.removeEventListener('click', onCancel);
+        pinOverlay.classList.remove('show');
+      }
+
+      async function submit(){
+        const pin = pinInput.value;
+        if(!pin){ pinError.textContent = 'Enter the PIN.'; return; }
+        pinSubmit.disabled = true;
+        try{
+          const res = await fetch('/api/unlock', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({pin})
+          });
+          const data = await res.json();
+          pinSubmit.disabled = false;
+          if(res.ok && data.ok){
+            cleanup();
+            resolve(true);
+          } else {
+            pinError.textContent = data.error || 'Incorrect PIN.';
+            pinInput.value = '';
+            pinInput.focus();
+          }
+        }catch(err){
+          pinSubmit.disabled = false;
+          pinError.textContent = 'Network error. Try again.';
+        }
+      }
+
+      function onKeydown(e){ if(e.key === 'Enter') submit(); }
+      function onCancel(){ cleanup(); resolve(false); }
+
+      pinSubmit.addEventListener('click', submit);
+      pinInput.addEventListener('keydown', onKeydown);
+      pinCancel.addEventListener('click', onCancel);
+    });
+  }
+
+  function pollProgress(jobId){
+    clearInterval(pollTimer);
+    pollTimer = setInterval(async () => {
+      try{
+        const res = await fetch(`/api/progress/${jobId}`);
+        const data = await res.json();
+        if(!res.ok){
+          clearInterval(pollTimer);
+          setStatus(data.error || 'Lost track of that download.', 'error');
+          setBusy(false);
+          progressWrap.classList.remove('show');
+          return;
+        }
+
+        if(typeof data.percent === 'number'){
+          progressFill.classList.remove('indeterminate');
+          progressFill.style.width = data.percent + '%';
+        }
+        const parts = [];
+        if(data.speed) parts.push(formatSpeed(data.speed));
+        if(data.eta !== undefined && data.eta !== null) parts.push(formatEta(data.eta));
+        progressMeta.textContent = parts.join(' · ');
+
+        if(data.stage === 'processing'){
+          setStatus('Processing (merging/converting)…');
+        } else {
+          setStatus('Downloading…');
+        }
+
+        if(data.status === 'finished'){
+          clearInterval(pollTimer);
+          progressFill.style.width = '100%';
+          setStatus('Grabbing the file…');
+          await deliverFile(jobId);
+        } else if(data.status === 'error'){
+          clearInterval(pollTimer);
+          setStatus(data.error || 'Download failed.', 'error');
+          setBusy(false);
+          progressWrap.classList.remove('show');
+        }
+      }catch(err){
+        clearInterval(pollTimer);
+        setStatus('Network error while checking progress.', 'error');
+        setBusy(false);
+      }
+    }, 800);
+  }
+
+  async function deliverFile(jobId){
+    try{
+      const res = await fetch(`/api/result/${jobId}`);
+      if(!res.ok){
+        const data = await res.json().catch(()=>({}));
+        setStatus(data.error || 'Could not retrieve the file.', 'error');
+        setBusy(false);
+        return;
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      const filename = match ? match[1] : 'download';
+
+      const a = document.createElement('a');
+      const objUrl = URL.createObjectURL(blob);
+      a.href = objUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objUrl);
+      setStatus('Downloaded.', 'ok');
+      resetForNextDownload();
+    }catch(err){
+      setStatus('Network error retrieving the file.', 'error');
+    }
+    setBusy(false);
+    progressWrap.classList.remove('show');
+  }
+
+  // Clears the input and puts the card back to its empty starting state
+  // (but leaves the "Downloaded." status message showing) so the next
+  // link can be pasted straight in without manually clearing anything.
+  function resetForNextDownload(){
+    urlInput.value = '';
+    currentUrl = '';
+    currentDirect = false;
+    infoData = null;
+    resultEl.classList.remove('show');
+    errorCard.classList.remove('show');
+    qualitySelect.style.display = 'none';
+    qualitySelect.innerHTML = '';
+    formatSelect.style.display = 'none';
+    formatSelect.innerHTML = '';
+    rsize.textContent = '';
+    urlInput.focus();
+  }
+
+  goBtn.addEventListener('click', fetchInfo);
+  dlBtn.addEventListener('click', doDownload);
+  urlInput.addEventListener('keydown', e => { if(e.key === 'Enter') fetchInfo(); });
 </script>
 </body>
 </html>

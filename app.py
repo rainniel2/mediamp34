@@ -1,258 +1,696 @@
-import base64
-import hmac
-import logging
 import os
 import re
-import secrets
-import shutil
-import tempfile
-import threading
+import hmac
+import json
 import time
 import uuid
-from datetime import timedelta
-from pathlib import Path
+import secrets
+import mimetypes
+import threading
+import tempfile
+from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 import requests
-import yt_dlp
-from flask import Flask, jsonify, render_template, request, send_file, session
+from flask import Flask, render_template, request, jsonify, send_file, session
+from PIL import Image
 
-APP_DIR = Path(__file__).resolve().parent
-DOWNLOAD_DIR = Path(tempfile.gettempdir()) / "mediamp34-downloads"
-DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+import yt_dlp
 
 app = Flask(__name__)
+
+# --- PIN gate (only gates starting an actual download, not previewing a
+# link's info) -------------------------------------------------------------
+#
+# Set ACCESS_PIN in the environment to turn this on; leave it unset and the
+# app behaves exactly as before (no PIN prompt at all). This is deliberately
+# basic: a shared PIN + a signed session cookie, meant to keep a leaked or
+# crawled link from being used by random visitors — not to withstand a
+# determined attacker.
+#
+# SECRET_KEY should also be set in production so sessions survive process
+# restarts (e.g. Render's free tier spinning down after idle time). Without
+# it, a random key is generated per process start, which means everyone's
+# "remembered" unlock is invalidated every time the app restarts. See
+# README for how to generate and set one.
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
-app.config.update(
-    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE="Lax",
-)
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 ACCESS_PIN = os.environ.get("ACCESS_PIN", "").strip()
-MAX_DOWNLOAD_MB = max(50, int(os.environ.get("MAX_DOWNLOAD_MB", "1024")))
-MAX_DURATION_SEC = max(60, int(os.environ.get("MAX_DURATION_SEC", "3600")))
-CLEANUP_AFTER_SEC = max(60, int(os.environ.get("CLEANUP_AFTER_SEC", "600")))
-YTDLP_PLAYER_CLIENT = os.environ.get("YTDLP_PLAYER_CLIENT", "").strip()
-
-LOG = logging.getLogger(__name__)
-
-JOBS = {}
-JOBS_LOCK = threading.Lock()
-
-AUTO_FALLBACK_CLIENTS = ["web_safari", "tv", "android_vr", "android"]
-YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"}
-URL_RE = re.compile(r"^https?://", re.I)
-
-COOKIE_PATH = Path(tempfile.gettempdir()) / "mediamp34-youtube-cookies.txt"
 
 
-def pin_enabled():
+def pin_gate_enabled():
     return bool(ACCESS_PIN)
 
 
-def unlocked():
-    return not pin_enabled() or session.get("unlocked") is True
+def is_unlocked():
+    return (not pin_gate_enabled()) or session.get("unlocked") is True
 
 
-def cleanup_path(path: Path):
+# Raster formats we can actually convert between with Pillow. SVG is vector,
+# so it's handled separately (passthrough only — no rasterizing/vectorizing).
+# PDF is here too: Pillow can wrap a single raster image as a one-page PDF,
+# which covers "turn this image into a PDF" without needing extra libraries.
+CONVERTIBLE_IMAGE_FORMATS = {
+    "png": "PNG",
+    "jpg": "JPEG",
+    "jpeg": "JPEG",
+    "webp": "WEBP",
+    "bmp": "BMP",
+    "gif": "GIF",
+    "pdf": "PDF",
+}
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+SVG_EXT = ".svg"
+
+# Non-media "just give me the file" extensions: documents, archives, and
+# other everyday file types that should skip yt-dlp entirely and stream
+# straight through, the same way a direct image/video link already does.
+DOCUMENT_EXTS = (
+    ".pdf", ".doc", ".docx", ".odt", ".rtf", ".txt", ".csv", ".json", ".xml",
+    ".xls", ".xlsx", ".ods", ".ppt", ".pptx", ".odp",
+    ".zip", ".rar", ".7z", ".tar", ".gz", ".apk", ".exe", ".dmg",
+    ".epub", ".mobi",
+)
+
+# Content-Types (as returned by a server, sans any ";charset=..." suffix)
+# that mean "this is a real webpage", not a downloadable file. Anything else
+# non-HTML-ish is treated as a file when we have to guess from the network
+# instead of the URL's extension.
+NON_FILE_CONTENT_TYPES = {
+    "text/html", "application/xhtml+xml", "",
+}
+
+DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "grabit-downloads")
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# In-memory job store. Fine for a single-process app (see Dockerfile:
+# gunicorn runs with --workers 1) — a personal tool for a couple of people
+# doesn't need anything heavier than this.
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+
+
+def _set_job(job_id, **fields):
+    with JOBS_LOCK:
+        JOBS[job_id].update(fields)
+
+
+def schedule_cleanup(path, delay=120):
+    """Delete a temp file a bit after it's been sent, so disk doesn't fill up."""
+    def _remove():
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    threading.Timer(delay, _remove).start()
+
+
+def friendly_error(e):
+    """
+    Turn a raw exception into something short enough to show in the UI.
+
+    Written for whoever's *using* the site, not whoever's running it — no
+    filenames, no README pointers, no yt-dlp/library jargon. The original,
+    technical message still gets logged (see below) so the owner can
+    actually diagnose things from Render's logs; visitors just never see it.
+    """
+    msg = str(e).strip()
+    low = msg.lower()
+    app.logger.warning("download failed: %s", msg)
+
+    if "404" in msg or "not found" in low:
+        return "That link doesn't exist (404, not found)."
+    if "403" in msg or "forbidden" in low:
+        return "That link is private or blocked (403, forbidden)."
+    if "unsupported url" in low:
+        return ("That link isn't from a site this app supports, and it doesn't "
+                 "look like a direct file link either. Try a link from a site "
+                 "like YouTube, TikTok, or X, or a direct link to an image, "
+                 "video, or document.")
+    if "unable to download webpage" in low or "name or service not known" in low:
+        return "Couldn't reach that link. Check the URL and try again."
+    if ("confirm you" in low and "bot" in low) or "netscape format" in low or "needs to be reloaded" in low:
+        return "YouTube isn't letting this one through right now. Try again in a bit, or try a different video."
+    # yt-dlp errors sometimes end with a long "report this issue" tail; drop it.
+    msg = msg.split("; please report")[0].strip()
+    return msg if len(msg) <= 160 else msg[:157] + "..."
+
+
+def convert_image(local_path, download_name, target_format):
+    """Convert a downloaded image file to another raster format with Pillow."""
+    target_format = target_format.lower()
+    pillow_fmt = CONVERTIBLE_IMAGE_FORMATS.get(target_format)
+    if not pillow_fmt:
+        raise ValueError(f"unsupported format '{target_format}'")
+
+    with Image.open(local_path) as img:
+        # JPEG and PDF (via Pillow) can't carry an alpha channel or a
+        # palette, so flatten those onto plain RGB first.
+        if pillow_fmt in ("JPEG", "PDF") and img.mode in ("RGBA", "LA", "P"):
+            img = img.convert("RGB")
+        new_path = os.path.splitext(local_path)[0] + f".{target_format}"
+        img.save(new_path, pillow_fmt)
+
+    if new_path != local_path:
+        try:
+            os.remove(local_path)
+        except OSError:
+            pass
+
+    base, _ = os.path.splitext(download_name)
+    return new_path, f"{base}.{target_format}"
+
+
+def image_format_options():
+    """Dropdown options for converting a downloaded raster image on the way
+    out: 'original' plus every Pillow target we support, deduped so 'jpg'
+    doesn't show up twice (jpg/jpeg map to the same Pillow codec)."""
+    return ["original"] + sorted({f for f in CONVERTIBLE_IMAGE_FORMATS if f != "jpeg"})
+
+
+# Path to an optional cookies.txt exported from a browser that's signed in
+# to YouTube. Drop a file here (or set COOKIES_FILE) to get past YouTube's
+# "Sign in to confirm you're not a bot" check. See README.
+COOKIES_FILE = os.environ.get(
+    "COOKIES_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+)
+
+NETSCAPE_HEADERS = ("# Netscape HTTP Cookie File", "# HTTP Cookie File")
+
+
+def _json_cookies_to_netscape(cookies):
+    """Convert a JSON cookie export (Cookie-Editor, EditThisCookie, etc.) into
+    the tab-separated Netscape format yt-dlp actually requires."""
+    far_future = str(int(time.time()) + 60 * 60 * 24 * 365)
+    lines = ["# Netscape HTTP Cookie File", "# auto-converted from JSON by grabit", ""]
+    for c in cookies:
+        domain = c.get("domain", "")
+        name = c.get("name", "")
+        if not domain or not name:
+            continue
+        host_only = c.get("hostOnly", not domain.startswith("."))
+        flag = "FALSE" if host_only else "TRUE"
+        path = c.get("path") or "/"
+        secure = "TRUE" if c.get("secure") else "FALSE"
+        expiry = c.get("expirationDate") or c.get("expiry")
+        expiry = str(int(float(expiry))) if expiry else far_future
+        value = c.get("value", "")
+        lines.append("\t".join([domain, flag, path, secure, expiry, name, value]))
+    return "\n".join(lines) + "\n"
+
+
+def _looks_like_domain(s):
+    s = (s or "").strip()
+    return bool(s) and "." in s and " " not in s and not s.replace(".", "").isdigit()
+
+
+def _expiry_to_unix(expires_raw, far_future):
+    s = (expires_raw or "").strip()
+    if not s or s.lower() == "session":
+        return far_future
     try:
-        if path.is_file() or path.is_symlink():
-            path.unlink(missing_ok=True)
-        elif path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
-    except OSError:
+        return str(int(float(s)))  # already a unix timestamp
+    except ValueError:
         pass
-
-
-def delayed_cleanup(path: Path, delay: int = CLEANUP_AFTER_SEC):
-    def worker():
-        time.sleep(delay)
-        cleanup_path(path)
-    threading.Thread(target=worker, daemon=True).start()
-
-
-def cleanup_all_job_files(job_id: str):
-    for p in DOWNLOAD_DIR.glob(f"{job_id}*"):
-        cleanup_path(p)
-
-
-def set_job(job_id, **updates):
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if job is not None:
-            job.update(updates)
-
-
-def get_job(job_id):
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        return dict(job) if job else None
-
-
-def remove_old_jobs():
-    cutoff = time.time() - 3600
-    with JOBS_LOCK:
-        stale = [jid for jid, j in JOBS.items() if j.get("created", 0) < cutoff]
-        for jid in stale:
-            JOBS.pop(jid, None)
-            cleanup_all_job_files(jid)
-
-
-def validate_url(url: str):
-    return bool(url and URL_RE.match(url))
-
-
-def is_youtube_url(url: str):
     try:
-        from urllib.parse import urlparse
-        return urlparse(url).hostname in YOUTUBE_HOSTS
-    except Exception:
-        return False
+        iso = s[:-1] + "+00:00" if s.endswith("Z") else s
+        return str(int(datetime.fromisoformat(iso).timestamp()))
+    except ValueError:
+        return far_future
 
 
-def write_cookie_secret_if_present():
-    encoded = os.environ.get("YTDLP_COOKIES_B64", "").strip()
-    if not encoded:
+def _devtools_table_to_netscape(raw):
+    """
+    Convert a copy-paste of Chrome/Firefox DevTools' Application > Cookies
+    table (Name, Value, Domain, Path, Expires, Size, HttpOnly, Secure, ...)
+    into Netscape format. This is a very common way people grab cookies
+    without a dedicated export extension.
+    """
+    far_future = str(int(time.time()) + 60 * 60 * 24 * 365)
+    lines = ["# Netscape HTTP Cookie File",
+              "# auto-converted from a DevTools cookie-table paste by grabit", ""]
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) < 4:
+            continue
+        name, value, domain, path = (fields + ["", "", "", ""])[:4]
+        expires_raw = fields[4] if len(fields) > 4 else ""
+        secure_flag = fields[7] if len(fields) > 7 else ""
+        name, domain = name.strip(), domain.strip()
+        if not name or not domain:
+            continue
+        host_only = not domain.startswith(".")
+        flag = "FALSE" if host_only else "TRUE"
+        secure = "TRUE" if secure_flag.strip() else "FALSE"
+        expiry = _expiry_to_unix(expires_raw, far_future)
+        lines.append("\t".join([domain, flag, path.strip() or "/", secure, expiry, name, value]))
+    return "\n".join(lines) + "\n"
+
+
+def resolved_cookies_file():
+    """
+    Return a path to a cookies file yt-dlp can actually load, fixing the two
+    most common reasons for "does not look like a Netscape format cookies
+    file": the export being JSON instead of Netscape, and the required
+    header comment being missing. Returns None if there's no cookies file.
+    """
+    if not os.path.isfile(COOKIES_FILE):
         return None
     try:
-        raw = base64.b64decode(encoded, validate=True)
-        COOKIE_PATH.write_bytes(raw)
-        return str(COOKIE_PATH)
-    except Exception as exc:
-        LOG.warning("Could not decode YTDLP_COOKIES_B64: %s", exc)
-        cleanup_path(COOKIE_PATH)
+        with open(COOKIES_FILE, "r", encoding="utf-8-sig") as f:
+            raw = f.read()
+    except OSError:
         return None
+
+    first_nonblank = next((ln for ln in raw.splitlines() if ln.strip()), "")
+    if first_nonblank.startswith(NETSCAPE_HEADERS):
+        return COOKIES_FILE  # already correct, nothing to do
+
+    stripped = raw.lstrip()
+    fixed_path = COOKIES_FILE + ".fixed.txt"
+
+    if stripped.startswith("[") or stripped.startswith("{"):
+        # A JSON cookie export saved with a .txt extension — convert it.
+        try:
+            data = json.loads(raw)
+            cookies = data if isinstance(data, list) else data.get("cookies", [])
+            with open(fixed_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(_json_cookies_to_netscape(cookies))
+            return fixed_path
+        except Exception:
+            return COOKIES_FILE  # couldn't fix it; let yt-dlp raise its own error
+
+    if "\t" in raw:
+        data_line = next(
+            (ln for ln in raw.splitlines() if ln.strip() and not ln.strip().startswith(("#", "$"))),
+            ""
+        )
+        fields = data_line.split("\t")
+
+        if len(fields) == 7 and fields[1] in ("TRUE", "FALSE") and fields[3] in ("TRUE", "FALSE"):
+            # Proper 7-column Netscape rows, just missing the header line.
+            with open(fixed_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write("# Netscape HTTP Cookie File\n" + raw)
+            return fixed_path
+
+        if len(fields) >= 8 and _looks_like_domain(fields[2]):
+            # A DevTools "Application > Cookies" table pasted as tab-separated
+            # text (Name, Value, Domain, Path, Expires, ...) — different
+            # column order and date format than Netscape entirely.
+            with open(fixed_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(_devtools_table_to_netscape(raw))
+            return fixed_path
+
+        # Unrecognized tab-separated shape: best-effort, assume it's just
+        # missing the header and let yt-dlp's own error surface if it isn't.
+        with open(fixed_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("# Netscape HTTP Cookie File\n" + raw)
+        return fixed_path
+
+    return COOKIES_FILE
 
 
 def base_ydl_opts():
-    opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "restrictfilenames": False,
-        "windowsfilenames": True,
-        "geo_bypass": True,
-        "socket_timeout": 15,
-        "retries": 3,
-        "fragment_retries": 3,
-        "concurrent_fragment_downloads": 1,
-    }
-    if YTDLP_PLAYER_CLIENT:
+    """
+    Options shared by every yt-dlp call.
+
+    We deliberately do NOT hardcode which YouTube "client" (web/tv/android/
+    etc.) to pretend to be. YouTube's bot checks and PO-token requirements
+    shift every few weeks, and yt-dlp's maintainers update its *default*
+    client list with every release to match whatever currently works best.
+    Since the Dockerfile always installs the latest yt-dlp on every deploy
+    (see comment there), leaning on that default keeps this self-updating
+    instead of quietly going stale like a client list pinned here would.
+
+    Set YTDLP_PLAYER_CLIENT (comma-separated, e.g. "tv,web_safari,android")
+    to force a specific client list if you hit a case where the default
+    genuinely does worse — see README.
+
+    If a cookies.txt is present, it's used as a fallback for the harder
+    cases (age/region-gated videos, or when an IP gets rate-limited).
+    """
+    opts = {}
+    player_client = os.environ.get("YTDLP_PLAYER_CLIENT", "").strip()
+    if player_client:
         opts["extractor_args"] = {
-            "youtube": {"player_client": [x.strip() for x in YTDLP_PLAYER_CLIENT.split(",") if x.strip()]}
+            "youtube": {"player_client": [c.strip() for c in player_client.split(",") if c.strip()]}
         }
-    cookies = write_cookie_secret_if_present()
-    if cookies:
-        opts["cookiefile"] = cookies
+    cookies_path = resolved_cookies_file()
+    if cookies_path:
+        opts["cookiefile"] = cookies_path
     return opts
 
 
-def looks_like_botcheck(exc):
-    s = str(exc).lower()
-    needles = (
-        "confirm you’re not a bot",
-        "confirm you're not a bot",
-        "confirm you are not a bot",
-        "sign in to confirm",
-        "po token",
-        "requires a token",
-        "not a bot",
-    )
-    return any(n in s for n in needles)
-
-
-def extract_with_retry(url, opts, download=False):
+def get_remote_filesize(url, timeout=8):
+    """
+    Best-effort HEAD request to read Content-Length before any download
+    starts, so the UI can show an estimated size up front. Returns None if
+    the server doesn't report one (chunked responses, some CDNs) rather
+    than guessing — the frontend just omits the size line in that case.
+    """
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(url, download=download)
-    except Exception as first:
-        if not is_youtube_url(url) or YTDLP_PLAYER_CLIENT or not looks_like_botcheck(first):
-            raise
-        retry = dict(opts)
-        retry["extractor_args"] = {"youtube": {"player_client": AUTO_FALLBACK_CLIENTS}}
-        with yt_dlp.YoutubeDL(retry) as ydl:
-            return ydl.extract_info(url, download=download)
-
-
-def friendly_error(exc):
-    msg = str(exc).strip()
-    low = msg.lower()
-    LOG.warning("yt-dlp/download error: %s", msg)
-    if "sign in to confirm" in low or "not a bot" in low or "po token" in low:
-        return "YouTube blocked this request from the server. Try another video, or configure YTDLP_COOKIES_B64 on Render."
-    if "unsupported url" in low:
-        return "That link is not supported. Paste a YouTube URL or a direct media link."
-    if "private video" in low or "members-only" in low or "login required" in low:
-        return "That video is private or requires a login."
-    if "video unavailable" in low or "this video is not available" in low:
-        return "That video is unavailable."
-    if "ffmpeg" in low:
-        return "FFmpeg could not process this media. Make sure the Render service is using the supplied Dockerfile."
-    if len(msg) > 220:
-        msg = msg[:217] + "..."
-    return msg or "Download failed."
-
-
-def quality_options(info):
-    heights = set()
-    for f in info.get("formats") or []:
-        h = f.get("height")
-        if isinstance(h, int) and h > 0 and h <= 1080:
-            heights.add(h)
-    ordered = sorted(heights, reverse=True)
-    return [{"value": str(h), "label": f"{h}p"} for h in ordered] + [{"value": "best", "label": "Best available"}]
-
-
-def best_audio_size(info):
-    candidates = [
-        f.get("filesize") or f.get("filesize_approx")
-        for f in (info.get("formats") or [])
-        if f.get("vcodec") == "none" and (f.get("acodec") not in (None, "none"))
-    ]
-    return max((x for x in candidates if isinstance(x, int)), default=None)
-
-
-def check_info_limits(info):
-    duration = info.get("duration")
-    if isinstance(duration, (int, float)) and duration > MAX_DURATION_SEC:
-        raise ValueError(f"This video is longer than the {MAX_DURATION_SEC // 60}-minute limit for this server.")
-
-
-def human_size(n):
-    if not n:
-        return None
-    value = float(n)
-    for unit in ("B", "KB", "MB", "GB"):
-        if value < 1024 or unit == "GB":
-            return f"{value:.1f} {unit}"
-        value /= 1024
+        r = requests.head(url, timeout=timeout, allow_redirects=True)
+        r.close()
+        length = r.headers.get("Content-Length")
+        if length and length.isdigit():
+            return int(length)
+    except requests.exceptions.RequestException:
+        pass
     return None
 
 
-def prepare_download_options(job_id, mode, quality):
-    output = DOWNLOAD_DIR / f"{job_id}.%(ext)s"
-    opts = base_ydl_opts()
-    opts.update({
-        "outtmpl": str(output),
-        "progress_hooks": [],
-        "continuedl": False,
-    })
+def looks_like_direct_file(url):
+    """Quick, offline check for links that just point straight at a file —
+    media, image, or any everyday document/archive type — based on the
+    extension alone. This is the fast path; probe_direct_url() below is the
+    fallback for links that don't carry a recognizable extension."""
+    path = urlparse(url).path.lower()
+    return path.endswith((
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",
+        ".mp4", ".mov", ".webm", ".mkv",
+        ".mp3", ".wav", ".ogg", ".m4a", ".flac",
+    ) + DOCUMENT_EXTS)
 
-    def progress_hook(d):
-        status = d.get("status")
-        if status == "downloading":
+
+def probe_direct_url(url, timeout=10):
+    """
+    Last-resort check for a link that yt-dlp couldn't make sense of and that
+    doesn't have a recognizable extension either (a CDN link with a hashed
+    filename and no extension, for example). Ask the server what it
+    actually is via the Content-Type header: if it's not a webpage, treat it
+    as a plain file to download as-is. Returns None for anything that looks
+    like a genuine webpage yt-dlp just doesn't support.
+    """
+    filesize = None
+    try:
+        r = requests.head(url, timeout=timeout, allow_redirects=True)
+        content_type = r.headers.get("Content-Type", "")
+        if r.status_code >= 400 or not content_type:
+            # Some servers don't answer HEAD requests properly; fall back to
+            # a tiny ranged GET instead of downloading the whole thing.
+            r = requests.get(
+                url, timeout=timeout, stream=True,
+                headers={"Range": "bytes=0-0"},
+            )
+            content_type = r.headers.get("Content-Type", "")
+            # A ranged response's own Content-Length is just the 1 byte we
+            # asked for; the real total is in Content-Range, e.g.
+            # "bytes 0-0/123456".
+            content_range = r.headers.get("Content-Range", "")
+            if "/" in content_range:
+                total = content_range.rsplit("/", 1)[-1].strip()
+                if total.isdigit():
+                    filesize = int(total)
+        else:
+            length = r.headers.get("Content-Length")
+            if length and length.isdigit():
+                filesize = int(length)
+        r.close()
+    except requests.exceptions.RequestException:
+        return None
+
+    content_type = content_type.split(";")[0].strip().lower()
+    if content_type in NON_FILE_CONTENT_TYPES:
+        return None
+
+    path_name = os.path.basename(urlparse(url).path)
+    ext = os.path.splitext(path_name)[1].lower()
+    if not ext:
+        ext = mimetypes.guess_extension(content_type) or ""
+        path_name = (path_name or "file") + ext
+
+    is_raster_image = content_type.startswith("image/") and ext.lstrip(".") in CONVERTIBLE_IMAGE_FORMATS
+    is_svg = content_type == "image/svg+xml" or ext == SVG_EXT
+
+    return {
+        "title": path_name,
+        "thumbnail": url if (is_raster_image or is_svg) else None,
+        "duration": None,
+        "uploader": None,
+        "direct": True,
+        "is_image": is_raster_image or is_svg,
+        "is_svg": is_svg,
+        "formats": image_format_options() if is_raster_image else [],
+        "qualities": [],
+        "content_type": content_type or None,
+        "filesize": filesize,
+    }
+
+
+# Tried automatically, once, if the default client selection hits YouTube's
+# bot-check/PO-token wall and the operator hasn't already forced a specific
+# client via YTDLP_PLAYER_CLIENT. Mixes clients with different PO-token
+# requirements so at least one is likely to still hand back usable formats.
+AUTO_FALLBACK_PLAYER_CLIENTS = ["web_safari", "tv", "android_vr", "android"]
+
+
+def _looks_like_botcheck(exc):
+    msg = str(exc).lower()
+    return (
+        ("confirm you" in msg and "bot" in msg)
+        or "po token" in msg
+        or "requires a token" in msg
+        or "the following content is not available" in msg
+    )
+
+
+def extract_with_retry(url, ydl_opts, download=False):
+    """
+    Run a yt-dlp extraction/download with the given options, and if it hits
+    YouTube's bot-check/PO-token wall, retry once with a broader mix of
+    player clients (AUTO_FALLBACK_PLAYER_CLIENTS) before giving up. Skipped
+    if YTDLP_PLAYER_CLIENT is set — that's an explicit operator choice we
+    shouldn't second-guess.
+    """
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=download)
+    except Exception as e:
+        if os.environ.get("YTDLP_PLAYER_CLIENT", "").strip() or not _looks_like_botcheck(e):
+            raise
+        retry_opts = dict(ydl_opts)
+        retry_opts["extractor_args"] = {
+            "youtube": {"player_client": list(AUTO_FALLBACK_PLAYER_CLIENTS)}
+        }
+        with yt_dlp.YoutubeDL(retry_opts) as ydl:
+            return ydl.extract_info(url, download=download)
+
+
+def build_quality_options(meta):
+    """
+    Turn yt-dlp's raw format list into a short, deduped list of resolutions
+    the user can actually pick between, e.g. [{"value": "1080", "label":
+    "1080p", "filesize": 48213000}, ...] plus a trailing "Best available"
+    option, and separately the best audio-only stream's size.
+
+    Sizes are estimates: yt-dlp reports "filesize" (exact) or
+    "filesize_approx" (estimated) per format, not always both, and actual
+    video downloads are muxed as video-only + audio-only streams merged
+    together — so each height's estimate is that height's largest known
+    video-only size plus the best audio-only size, which is what a merged
+    download will actually end up close to. Formats/heights with no size
+    reported at all (common for some live/DASH formats) come back as
+    filesize: None, and the UI just omits the number rather than guessing.
+    """
+    formats = meta.get("formats") or []
+
+    best_audio_size = 0
+    for f in formats:
+        if f.get("vcodec") in (None, "none") and f.get("acodec") not in (None, "none"):
+            size = f.get("filesize") or f.get("filesize_approx") or 0
+            best_audio_size = max(best_audio_size, size)
+
+    heights = {}  # height -> largest known video-only size at that height
+    for f in formats:
+        height = f.get("height")
+        if not height or f.get("vcodec") in (None, "none"):
+            continue
+        size = f.get("filesize") or f.get("filesize_approx") or 0
+        heights[height] = max(heights.get(height, 0), size)
+
+    result = []
+    for h in sorted(heights, reverse=True):
+        video_size = heights[h]
+        total = (video_size + best_audio_size) if video_size else 0
+        result.append({"value": str(h), "label": f"{h}p", "filesize": total or None})
+    result.append({"value": "best", "label": "Best available", "filesize": None})
+
+    return result, (best_audio_size or None)
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/api/config")
+def config():
+    # Lets the frontend know up front whether it should expect a PIN prompt
+    # (shows a small lock hint on the Save button) — no secrets in here.
+    return jsonify({"pin_required": pin_gate_enabled()})
+
+
+@app.route("/api/unlock", methods=["POST"])
+def unlock():
+    if not pin_gate_enabled():
+        session.permanent = True
+        session["unlocked"] = True
+        return jsonify({"ok": True})
+
+    data = request.get_json(force=True) or {}
+    pin = str(data.get("pin", ""))
+    # Constant-time compare so response timing can't be used to guess the
+    # PIN character-by-character.
+    if pin and hmac.compare_digest(pin, ACCESS_PIN):
+        session.permanent = True
+        session["unlocked"] = True
+        return jsonify({"ok": True})
+
+    return jsonify({"ok": False, "error": "Incorrect PIN."}), 401
+
+
+@app.route("/api/info", methods=["POST"])
+def info():
+    data = request.get_json(force=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "Paste a link first."}), 400
+
+    # Direct file links: skip yt-dlp entirely, just describe the file.
+    if looks_like_direct_file(url):
+        filename = os.path.basename(urlparse(url).path) or "file"
+        ext = os.path.splitext(urlparse(url).path)[1].lower()
+        is_svg = ext == SVG_EXT
+        is_raster_image = ext in IMAGE_EXTS
+        is_image = is_raster_image or is_svg
+
+        formats = image_format_options() if is_raster_image else []
+
+        return jsonify({
+            "title": filename,
+            "thumbnail": url if is_raster_image or is_svg else None,
+            "duration": None,
+            "uploader": None,
+            "direct": True,
+            "is_image": is_image,
+            "is_svg": is_svg,
+            "formats": formats,
+            "qualities": [],
+            "filesize": get_remote_filesize(url),
+        })
+
+    try:
+        ydl_opts = {
+            "quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True,
+            **base_ydl_opts(),
+        }
+        meta = extract_with_retry(url, ydl_opts, download=False)
+        qualities, audio_filesize = build_quality_options(meta)
+        return jsonify({
+            "title": meta.get("title") or "Untitled",
+            "thumbnail": meta.get("thumbnail"),
+            "duration": meta.get("duration"),
+            "uploader": meta.get("uploader") or meta.get("channel"),
+            "direct": False,
+            "is_image": False,
+            "is_svg": False,
+            "formats": [],
+            "qualities": qualities,
+            "audio_filesize": audio_filesize,
+        })
+    except Exception as e:
+        # Not a site yt-dlp recognizes, and not a recognizable file
+        # extension either — last resort, ask the server what it actually
+        # is (a PDF/zip/doc/etc. with a hashed CDN filename, say) before
+        # giving up with an error.
+        probed = probe_direct_url(url)
+        if probed:
+            return jsonify(probed)
+        return jsonify({"error": friendly_error(e)}), 400
+
+
+def _run_direct_download(job_id, url, target_format=None):
+    try:
+        r = requests.get(url, stream=True, timeout=30)
+        r.raise_for_status()
+        total = int(r.headers.get("Content-Length") or 0)
+        ext = os.path.splitext(urlparse(url).path)[1] or ""
+        if not ext:
+            content_type = r.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            ext = mimetypes.guess_extension(content_type) or ""
+        local_path = os.path.join(DOWNLOAD_DIR, f"{job_id}{ext}")
+
+        done = 0
+        with open(local_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                f.write(chunk)
+                done += len(chunk)
+                percent = round(done / total * 100, 1) if total else None
+                _set_job(job_id, percent=percent, downloaded=done, total=total or None)
+
+        download_name = os.path.basename(urlparse(url).path) or f"download{ext}"
+
+        if target_format and target_format != "original":
+            _set_job(job_id, percent=99, stage="processing")
+            try:
+                local_path, download_name = convert_image(local_path, download_name, target_format)
+            except Exception as e:
+                _set_job(job_id, status="error",
+                          error=f"Couldn't convert to {target_format.upper()} ({e}).")
+                return
+
+        _set_job(job_id, status="finished", percent=100, filename=local_path,
+                  download_name=download_name)
+    except requests.exceptions.HTTPError as e:
+        code = e.response.status_code if e.response is not None else None
+        if code == 404:
+            _set_job(job_id, status="error", error="That link doesn't exist (404, not found).")
+        elif code == 403:
+            _set_job(job_id, status="error", error="That link is private or blocked (403, forbidden).")
+        else:
+            _set_job(job_id, status="error", error=f"The server rejected that link (HTTP {code}).")
+    except requests.exceptions.RequestException:
+        _set_job(job_id, status="error",
+                  error="Couldn't reach that link. Check the URL and try again.")
+    except Exception as e:
+        _set_job(job_id, status="error", error=friendly_error(e))
+
+
+def _run_ytdlp_download(job_id, url, mode, quality):
+    outtmpl = os.path.join(DOWNLOAD_DIR, f"{job_id}.%(ext)s")
+
+    def hook(d):
+        if d.get("status") == "downloading":
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
-            done = d.get("downloaded_bytes") or 0
-            pct = round(done * 100 / total, 1) if total else None
-            set_job(job_id, status="downloading", percent=pct, downloaded=done, total=total,
-                    speed=d.get("speed"), eta=d.get("eta"), stage="downloading")
-        elif status == "finished":
-            set_job(job_id, percent=99, stage="processing")
+            downloaded = d.get("downloaded_bytes") or 0
+            percent = round(downloaded / total * 100, 1) if total else None
+            _set_job(
+                job_id,
+                percent=percent,
+                downloaded=downloaded,
+                total=total,
+                speed=d.get("speed"),
+                eta=d.get("eta"),
+            )
+        elif d.get("status") == "finished":
+            # yt-dlp still has to mux/convert after this; reflect that.
+            _set_job(job_id, percent=99, stage="processing")
 
-    opts["progress_hooks"] = [progress_hook]
+    ydl_opts = {
+        "outtmpl": outtmpl,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "progress_hooks": [hook],
+        **base_ydl_opts(),
+    }
 
     if mode == "audio":
-        opts.update({
+        ydl_opts.update({
             "format": "bestaudio/best",
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
@@ -261,161 +699,106 @@ def prepare_download_options(job_id, mode, quality):
             }],
         })
     else:
-        if quality and quality.isdigit():
-            h = min(int(quality), 1080)
-            fmt = f"bv*[height<={h}]+ba/b[height<={h}]/b"
+        if quality and quality != "best":
+            height_cap = f"[height<={quality}]"
         else:
-            fmt = "bv*[height<=1080]+ba/b[height<=1080]/b"
-        opts.update({
-            "format": fmt,
+            height_cap = ""
+        ydl_opts.update({
+            "format": f"bestvideo*{height_cap}+bestaudio/best{height_cap}/best",
             "merge_output_format": "mp4",
         })
-    return opts
 
-
-def locate_output(job_id, mode):
-    candidates = [p for p in DOWNLOAD_DIR.glob(f"{job_id}.*") if p.is_file() and not p.name.endswith(".part")]
-    if mode == "audio":
-        mp3 = DOWNLOAD_DIR / f"{job_id}.mp3"
-        if mp3.exists():
-            return mp3
-    if candidates:
-        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return candidates[0]
-    return None
-
-
-def run_download(job_id, url, mode, quality):
     try:
-        check = get_job(job_id)
-        if not check:
-            return
-        set_job(job_id, status="downloading", stage="starting", percent=0)
-        opts = prepare_download_options(job_id, mode, quality)
-        info = extract_with_retry(url, opts, download=True)
-        check_info_limits(info or {})
-        path = locate_output(job_id, mode)
-        if not path or not path.exists():
-            raise FileNotFoundError("The media was downloaded but the output file could not be found.")
-        max_bytes = MAX_DOWNLOAD_MB * 1024 * 1024
-        size = path.stat().st_size
-        if size > max_bytes:
-            cleanup_path(path)
-            raise ValueError(f"The resulting file is larger than the {MAX_DOWNLOAD_MB} MB server limit.")
+        meta = extract_with_retry(url, ydl_opts, download=True)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            filename = ydl.prepare_filename(meta)
         if mode == "audio":
-            ext = ".mp3"
-        else:
-            ext = path.suffix.lower() or ".mp4"
-        title = info.get("title") or "download"
-        safe_title = re.sub(r"[\\/:*?\"<>|\r\n]+", "-", title).strip(" .-") or "download"
-        filename = f"{safe_title}{ext}"
-        set_job(job_id, status="ready", stage="ready", percent=100, path=str(path),
-                filename=filename, filesize=size, title=title, thumbnail=info.get("thumbnail"))
-        delayed_cleanup(path)
-    except Exception as exc:
-        cleanup_all_job_files(job_id)
-        set_job(job_id, status="error", stage="error", error=friendly_error(exc))
+            base, _ = os.path.splitext(filename)
+            candidate = base + ".mp3"
+            if os.path.exists(candidate):
+                filename = candidate
+
+        if not os.path.exists(filename):
+            _set_job(job_id, status="error", error="Download finished but the file went missing. Try again.")
+            return
+
+        _set_job(job_id, status="finished", percent=100, filename=filename,
+                  download_name=os.path.basename(filename))
+    except Exception as e:
+        _set_job(job_id, status="error", error=friendly_error(e))
 
 
-@app.route("/")
-def index():
-    return render_template("index.html", pin_required=pin_enabled())
+@app.route("/api/start", methods=["POST"])
+def start():
+    # Previewing a link's info (/api/info) is always free to use; only
+    # actually starting a download is gated behind the PIN, so browsing the
+    # UI never requires it.
+    if not is_unlocked():
+        return jsonify({"error": "PIN required to download.", "locked": True}), 401
 
+    data = request.get_json(force=True) or {}
+    url = (data.get("url") or "").strip()
+    mode = data.get("mode", "auto")          # "auto" | "video" | "audio"
+    quality = data.get("quality", "best")    # e.g. "1080", "720", "best"
+    img_format = data.get("format", "original")  # "original" | "png" | "jpg" | "pdf" | ...
+    # /api/info already worked out whether this is a direct file (including
+    # the extensionless/probed case) — trust that if the client sent it,
+    # rather than re-deciding from the extension alone and losing the probe.
+    direct_hint = data.get("direct")
 
-@app.route("/healthz")
-def healthz():
-    return jsonify({"ok": True, "yt_dlp": yt_dlp.version.__version__})
+    if not url:
+        return jsonify({"error": "Paste a link first."}), 400
 
-
-@app.route("/api/config")
-def api_config():
-    return jsonify({"pin_required": pin_enabled(), "max_download_mb": MAX_DOWNLOAD_MB, "max_duration_sec": MAX_DURATION_SEC})
-
-
-@app.route("/api/unlock", methods=["POST"])
-def api_unlock():
-    if not pin_enabled():
-        session.permanent = True
-        session["unlocked"] = True
-        return jsonify({"ok": True})
-    data = request.get_json(silent=True) or {}
-    pin = str(data.get("pin", ""))
-    if hmac.compare_digest(pin, ACCESS_PIN):
-        session.permanent = True
-        session["unlocked"] = True
-        return jsonify({"ok": True})
-    return jsonify({"ok": False, "error": "Incorrect PIN."}), 401
-
-
-@app.route("/api/info", methods=["POST"])
-def api_info():
-    remove_old_jobs()
-    data = request.get_json(silent=True) or {}
-    url = str(data.get("url", "")).strip()
-    if not validate_url(url):
-        return jsonify({"error": "Paste a complete http:// or https:// URL."}), 400
-    try:
-        opts = base_ydl_opts()
-        opts.update({"skip_download": True, "extract_flat": False})
-        info = extract_with_retry(url, opts, download=False)
-        check_info_limits(info)
-        return jsonify({
-            "title": info.get("title") or "Untitled",
-            "thumbnail": info.get("thumbnail"),
-            "duration": info.get("duration"),
-            "uploader": info.get("uploader"),
-            "webpage_url": info.get("webpage_url") or url,
-            "qualities": quality_options(info),
-            "audio_filesize": best_audio_size(info),
-        })
-    except Exception as exc:
-        return jsonify({"error": friendly_error(exc)}), 400
-
-
-@app.route("/api/download", methods=["POST"])
-def api_download():
-    if not unlocked():
-        return jsonify({"error": "PIN required.", "needs_pin": True}), 401
-    remove_old_jobs()
-    data = request.get_json(silent=True) or {}
-    url = str(data.get("url", "")).strip()
-    mode = str(data.get("mode", "video")).lower()
-    quality = str(data.get("quality", "best"))
-    if not validate_url(url):
-        return jsonify({"error": "Paste a valid URL."}), 400
-    if mode not in {"video", "audio"}:
-        return jsonify({"error": "Invalid download mode."}), 400
     job_id = uuid.uuid4().hex
     with JOBS_LOCK:
-        JOBS[job_id] = {"created": time.time(), "status": "queued", "percent": 0, "stage": "queued"}
-    threading.Thread(target=run_download, args=(job_id, url, mode, quality), daemon=True).start()
+        JOBS[job_id] = {
+            "status": "downloading",
+            "percent": 0,
+            "created": time.time(),
+        }
+
+    is_direct = bool(direct_hint) if direct_hint is not None else looks_like_direct_file(url)
+    if is_direct and mode != "audio":
+        t = threading.Thread(target=_run_direct_download, args=(job_id, url, img_format), daemon=True)
+    else:
+        t = threading.Thread(target=_run_ytdlp_download, args=(job_id, url, mode, quality), daemon=True)
+    t.start()
+
     return jsonify({"job_id": job_id})
 
 
 @app.route("/api/progress/<job_id>")
-def api_progress(job_id):
-    job = get_job(job_id)
+def progress(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
     if not job:
-        return jsonify({"error": "Download job not found."}), 404
-    safe = {k: v for k, v in job.items() if k not in {"path"}}
+        return jsonify({"error": "Unknown job."}), 404
+    # Don't leak the server filesystem path to the client.
+    safe = {k: v for k, v in job.items() if k != "filename"}
     return jsonify(safe)
 
 
-@app.route("/api/file/<job_id>")
-def api_file(job_id):
-    job = get_job(job_id)
-    if not job or job.get("status") != "ready":
-        return jsonify({"error": "The file is not ready."}), 404
-    if not unlocked():
-        return jsonify({"error": "PIN required.", "needs_pin": True}), 401
-    path = Path(job["path"])
-    if not path.exists():
-        return jsonify({"error": "The temporary file has already expired. Please download it again."}), 410
-    response = send_file(path, as_attachment=True, download_name=job.get("filename") or path.name)
-    response.call_on_close(lambda: cleanup_path(path))
+@app.route("/api/result/<job_id>")
+def result(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+    if not job:
+        return jsonify({"error": "Unknown job."}), 404
+    if job.get("status") != "finished":
+        return jsonify({"error": "Not ready yet."}), 409
+
+    filename = job["filename"]
+    download_name = job.get("download_name") or os.path.basename(filename)
+
+    response = send_file(filename, as_attachment=True, download_name=download_name)
+    schedule_cleanup(filename)
+    with JOBS_LOCK:
+        JOBS.pop(job_id, None)
     return response
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    # Local dev only — in production (Render etc.) gunicorn runs this instead,
+    # see Dockerfile.
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", debug=True, port=port, threaded=True)
